@@ -13,13 +13,16 @@ use wtransport::Endpoint;
 use wtransport::Identity;
 use wtransport::ServerConfig;
 
+use crate::state::GatewayState;
+
 pub struct WebTransportServer {
     endpoint: Endpoint<Server>,
     webhook: Option<Webhook>,
+    state: GatewayState,
 }
 
 impl WebTransportServer {
-    pub fn new(identity: Identity, port: u16, webhook_url: Option<String>) -> Result<Self> {
+    pub fn new(identity: Identity, port: u16, webhook_url: Option<String>, state: GatewayState) -> Result<Self> {
         let config = ServerConfig::builder()
             .with_bind_default(port)
             .with_identity(identity)
@@ -35,7 +38,7 @@ impl WebTransportServer {
                 .expect("reqwest client"),
         });
 
-        Ok(Self { endpoint, webhook })
+        Ok(Self { endpoint, webhook, state })
     }
 
     pub fn local_port(&self) -> u16 {
@@ -48,8 +51,9 @@ impl WebTransportServer {
         for id in 0.. {
             let incoming_session = self.endpoint.accept().await;
             let webhook = self.webhook.clone();
+            let state = self.state.clone();
             tokio::spawn(
-                Self::handle_incoming_session(incoming_session, webhook)
+                Self::handle_incoming_session(incoming_session, webhook, state)
                     .instrument(info_span!("wt", id)),
             );
         }
@@ -57,13 +61,18 @@ impl WebTransportServer {
         Ok(())
     }
 
-    async fn handle_incoming_session(incoming_session: IncomingSession, webhook: Option<Webhook>) {
+    async fn handle_incoming_session(
+        incoming_session: IncomingSession,
+        webhook: Option<Webhook>,
+        state: GatewayState,
+    ) {
         let connection_id = Uuid::new_v4().to_string();
 
         async fn impl_(
             incoming_session: IncomingSession,
             webhook: Option<Webhook>,
             connection_id: &str,
+            state: GatewayState,
         ) -> Result<()> {
             let mut buffer = vec![0; 65536].into_boxed_slice();
 
@@ -77,6 +86,7 @@ impl WebTransportServer {
             );
 
             let connection = session_request.accept().await?;
+            let mut outbound_rx = state.register_connection(connection_id.to_string());
             info!("Session ready; waiting for client data...");
 
             if let Some(webhook) = webhook.as_ref() {
@@ -90,6 +100,17 @@ impl WebTransportServer {
 
             loop {
                 tokio::select! {
+                    outbound = outbound_rx.recv() => {
+                        let Some(outbound) = outbound else {
+                            continue;
+                        };
+
+                        match outbound {
+                            crate::state::OutboundMessage::Datagram(bytes) => {
+                                connection.send_datagram(&bytes)?;
+                            }
+                        }
+                    }
                     stream = connection.accept_bi() => {
                         let mut stream = stream?;
                         info!("Accepted BI stream");
@@ -155,8 +176,10 @@ impl WebTransportServer {
             }
         }
 
-        let result = impl_(incoming_session, webhook.clone(), &connection_id).await;
+        let result = impl_(incoming_session, webhook.clone(), &connection_id, state.clone()).await;
         info!("Session ended: {:?}", result);
+
+        state.unregister_connection(&connection_id);
 
         if let Some(webhook) = webhook.as_ref() {
             webhook.send(GatewayEvent {

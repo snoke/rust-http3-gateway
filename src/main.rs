@@ -4,6 +4,8 @@ use tracing::error;
 use tracing::info;
 use wtransport::Identity;
 
+mod api_server;
+mod state;
 mod webtransport_server;
 
 #[tokio::main]
@@ -13,6 +15,7 @@ async fn main() -> Result<()> {
         .init();
 
     let webtransport_port = env_u16("WEBTRANSPORT_PORT").unwrap_or(4433);
+    let http_api_port = env_u16("HTTP_API_PORT").unwrap_or(8080);
     let webhook_url = std::env::var("SYMFONY_WEBHOOK_URL").ok().filter(|v| !v.is_empty());
     let cert_pem = std::env::var("CERT_PEMFILE").unwrap_or_else(|_| "/run/certs/dev_cert.pem".into());
     let key_pem =
@@ -24,13 +27,27 @@ async fn main() -> Result<()> {
         .await
         .context("failed to load TLS identity from PEM files")?;
 
+    let state = state::GatewayState::default();
+
     let webtransport_server =
-        webtransport_server::WebTransportServer::new(identity, webtransport_port, webhook_url)?;
+        webtransport_server::WebTransportServer::new(identity, webtransport_port, webhook_url, state.clone())?;
 
     info!(webtransport_port = webtransport_server.local_port(), "server started");
 
-    let result = webtransport_server.serve().await;
-    error!("WebTransport server stopped: {:?}", result);
+    let wt_task = tokio::spawn(async move { webtransport_server.serve().await });
+    let api_task = tokio::spawn(async move { api_server::serve(http_api_port, state).await });
+
+    tokio::select! {
+        result = wt_task => {
+            error!("WebTransport server stopped: {:?}", result);
+        }
+        result = api_task => {
+            error!("HTTP API server stopped: {:?}", result);
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("shutdown requested");
+        }
+    }
 
     Ok(())
 }
