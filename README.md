@@ -30,4 +30,4 @@ Environment variables:
 - `KEY_PEMFILE` (default: `/run/certs/dev_key.pem`)
 - `WEBTRANSPORT_PORT` (default: `4433`)
 - `HTTP_API_PORT` (default: `8080`)
-- `SYMFONY_WEBHOOK_URL` (optional; enable webhook POSTs)
+- `WEBHOOK_URL` (optional; enable webhook POSTs)
