@@ -16,7 +16,10 @@ async fn main() -> Result<()> {
 
     let webtransport_port = env_u16("WEBTRANSPORT_PORT").unwrap_or(4433);
     let http_api_port = env_u16("HTTP_API_PORT").unwrap_or(8080);
-    let webhook_url = std::env::var("SYMFONY_WEBHOOK_URL").ok().filter(|v| !v.is_empty());
+    let webhook_url = std::env::var("WEBHOOK_URL")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var("SYMFONY_WEBHOOK_URL").ok().filter(|v| !v.is_empty()));
     let cert_pem = std::env::var("CERT_PEMFILE").unwrap_or_else(|_| "/run/certs/dev_cert.pem".into());
     let key_pem =
         std::env::var("KEY_PEMFILE").unwrap_or_else(|_| "/run/certs/dev_key.pem".into());
