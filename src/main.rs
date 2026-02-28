@@ -4,9 +4,9 @@ use tracing::error;
 use tracing::info;
 use wtransport::Identity;
 
-mod api_server;
 mod state;
 mod webtransport_server;
+mod publisher;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     info!(webtransport_port = webtransport_server.local_port(), "server started");
 
     let wt_task = tokio::spawn(async move { webtransport_server.serve().await });
-    let api_task = tokio::spawn(async move { api_server::serve(http_api_port, state).await });
+    let api_task = tokio::spawn(async move { publisher::serve(http_api_port, state).await });
 
     tokio::select! {
         result = wt_task => {

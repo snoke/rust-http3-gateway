@@ -2,10 +2,10 @@ use crate::state::{GatewayState, PublishError};
 use axum::{
     extract::State,
     http::StatusCode,
-    routing::{get, post},
+    routing::post,
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tracing::info;
 
 #[derive(Clone)]
@@ -19,16 +19,10 @@ struct PublishRequest {
     payload: String,
 }
 
-#[derive(Serialize)]
-struct OkResponse {
-    ok: bool,
-}
-
 pub async fn serve(port: u16, gateway: GatewayState) -> anyhow::Result<()> {
     let app_state = AppState { gateway };
 
     let app = Router::new()
-        .route("/health", get(health))
         .route("/internal/publish", post(publish))
         .with_state(app_state);
 
@@ -38,10 +32,6 @@ pub async fn serve(port: u16, gateway: GatewayState) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-async fn health() -> Json<OkResponse> {
-    Json(OkResponse { ok: true })
 }
 
 async fn publish(
