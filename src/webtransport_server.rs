@@ -179,7 +179,7 @@ impl WebTransportServer {
         let result = impl_(incoming_session, webhook.clone(), &connection_id, state.clone()).await;
         info!("Session ended: {:?}", result);
 
-        if let (Some(webhook), Err(err)) = (webhook.as_ref(), result.as_ref().err()) {
+        if let (Some(webhook), Some(err)) = (webhook.as_ref(), result.as_ref().err()) {
             webhook.send(GatewayEvent {
                 r#type: "error",
                 connection_id: connection_id.clone(),
