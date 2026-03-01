@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 use tracing::{info_span, Instrument};
 use uuid::Uuid;
@@ -148,7 +148,6 @@ impl WebTransportServer {
                 })
             };
 
-            let mut buffer = vec![0; 65536].into_boxed_slice();
             loop {
                 tokio::select! {
                     stream = connection.accept_bi() => {
@@ -156,14 +155,12 @@ impl WebTransportServer {
                             Ok(stream) => stream,
                             Err(_) => break,
                         };
-                        let bytes_read = match stream.1.read(&mut buffer).await? {
-                            Some(count) => count,
-                            None => continue,
-                        };
-                        if bytes_read == 0 {
+                        let mut buffer = Vec::new();
+                        stream.1.read_to_end(&mut buffer).await?;
+                        if buffer.is_empty() {
                             continue;
                         }
-                        let raw = std::str::from_utf8(&buffer[..bytes_read]).unwrap_or("").to_string();
+                        let raw = std::str::from_utf8(&buffer).unwrap_or("").to_string();
                         handle_client_message(&connection_id, &info, raw, &config, redis.as_ref()).await;
                     }
                     dgram = connection.receive_datagram() => {
