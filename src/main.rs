@@ -1,12 +1,14 @@
-use anyhow::Context;
-use anyhow::Result;
-use tracing::error;
-use tracing::info;
+use anyhow::{Context, Result};
+use tracing::{error, info};
 use wtransport::Identity;
 
+mod auth;
+mod broker;
+mod config;
+mod http_api;
+mod message;
 mod state;
 mod webtransport_server;
-mod publisher;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -14,12 +16,9 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let webtransport_port = env_u16("WEBTRANSPORT_PORT").unwrap_or(4433);
-    let http_api_port = env_u16("HTTP_API_PORT").unwrap_or(8080);
-    let webhook_url = std::env::var("WEBHOOK_URL").ok().filter(|v| !v.is_empty());
-    let cert_pem = std::env::var("CERT_PEMFILE").unwrap_or_else(|_| "/run/certs/dev_cert.pem".into());
-    let key_pem =
-        std::env::var("KEY_PEMFILE").unwrap_or_else(|_| "/run/certs/dev_key.pem".into());
+    let config = config::Config::from_env();
+    let cert_pem = config.cert_pemfile.clone();
+    let key_pem = config.key_pemfile.clone();
 
     // Use a fixed cert/key in dev so the browser can pin the certificate hash (WebTransport
     // `serverCertificateHashes`) without needing to trust a local CA.
@@ -30,12 +29,22 @@ async fn main() -> Result<()> {
     let state = state::GatewayState::default();
 
     let webtransport_server =
-        webtransport_server::WebTransportServer::new(identity, webtransport_port, webhook_url, state.clone())?;
+        webtransport_server::WebTransportServer::new(identity, config.clone(), state.clone())?;
 
     info!(webtransport_port = webtransport_server.local_port(), "server started");
 
+    if !config.redis_dsn.is_empty() {
+        if let Ok(redis) = redis::Client::open(config.redis_dsn.as_str()) {
+            let state_clone = state.clone();
+            let config_clone = config.clone();
+            tokio::spawn(async move {
+                broker::start_outbox_consumer(state_clone, config_clone, redis).await;
+            });
+        }
+    }
+
     let wt_task = tokio::spawn(async move { webtransport_server.serve().await });
-    let api_task = tokio::spawn(async move { publisher::serve(http_api_port, state).await });
+    let api_task = tokio::spawn(async move { http_api::serve(config.http_api_port, config, state).await });
 
     tokio::select! {
         result = wt_task => {
@@ -50,8 +59,4 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-fn env_u16(key: &str) -> Option<u16> {
-    std::env::var(key).ok()?.parse::<u16>().ok()
 }
