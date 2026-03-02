@@ -4,8 +4,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-const MAX_CONNECTIONS_PER_USER: usize = 2;
-
 #[derive(Clone, Debug)]
 pub enum OutboundMessage {
     Text(String),
@@ -18,6 +16,7 @@ pub struct ConnectionInfo {
     pub client_instance_id: String,
     pub subjects: Vec<String>,
     pub connected_at: i64,
+    pub last_seen_at: i64,
 }
 
 #[derive(Clone)]
@@ -26,13 +25,28 @@ struct ConnectionHandle {
     sender: mpsc::UnboundedSender<OutboundMessage>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct GatewayState {
     connections: Arc<DashMap<String, ConnectionHandle>>,
     subjects: Arc<DashMap<String, DashSet<String>>>,
+    max_connections_per_user: Option<usize>,
+}
+
+impl Default for GatewayState {
+    fn default() -> Self {
+        Self::new(None)
+    }
 }
 
 impl GatewayState {
+    pub fn new(max_connections_per_user: Option<usize>) -> Self {
+        Self {
+            connections: Arc::new(DashMap::new()),
+            subjects: Arc::new(DashMap::new()),
+            max_connections_per_user,
+        }
+    }
+
     pub fn register_connection(
         &self,
         connection_id: String,
@@ -83,14 +97,16 @@ impl GatewayState {
                 }
             }
         }
-        // Hard cap per user to prevent stale/reconnect leaks from growing without bound.
-        // Keep the newest connections (oldest are removed first).
-        if same_user_connections.len() >= MAX_CONNECTIONS_PER_USER {
-            let overflow = (same_user_connections.len() + 1).saturating_sub(MAX_CONNECTIONS_PER_USER);
-            for (stale_id, _) in same_user_connections.into_iter().take(overflow) {
-                if stale_id != connection_id {
-                    if let Some(info) = self.unregister_connection(&stale_id) {
-                        evicted.push(info);
+        // Optional cap per user; 0/None means unlimited.
+        if let Some(max_connections_per_user) = self.max_connections_per_user {
+            if same_user_connections.len() >= max_connections_per_user {
+                let overflow =
+                    (same_user_connections.len() + 1).saturating_sub(max_connections_per_user);
+                for (stale_id, _) in same_user_connections.into_iter().take(overflow) {
+                    if stale_id != connection_id {
+                        if let Some(info) = self.unregister_connection(&stale_id) {
+                            evicted.push(info);
+                        }
                     }
                 }
             }
@@ -103,6 +119,7 @@ impl GatewayState {
             client_instance_id,
             subjects: subjects.clone(),
             connected_at,
+            last_seen_at: connected_at,
         };
         self.connections.insert(
             connection_id.clone(),
@@ -119,7 +136,7 @@ impl GatewayState {
         let handle = self.connections.remove(connection_id).map(|(_, handle)| handle);
         if let Some(handle) = handle {
             for subject in &handle.info.subjects {
-                if let Some(mut entry) = self.subjects.get_mut(subject) {
+                if let Some(entry) = self.subjects.get_mut(subject) {
                     entry.remove(connection_id);
                     if entry.is_empty() {
                         drop(entry);
@@ -166,9 +183,11 @@ impl GatewayState {
             }
         }
         let mut stale_ids = Vec::new();
+        let now_ts = chrono::Utc::now().timestamp();
         for id in target_ids {
-            if let Some(handle) = self.connections.get(id.as_str()) {
+            if let Some(mut handle) = self.connections.get_mut(id.as_str()) {
                 if handle.sender.send(OutboundMessage::Text(message.clone())).is_ok() {
+                    handle.info.last_seen_at = now_ts;
                     sent += 1;
                 } else {
                     stale_ids.push(id);
@@ -181,5 +200,41 @@ impl GatewayState {
             let _ = self.unregister_connection(&stale_id);
         }
         sent
+    }
+
+    pub fn mark_connection_alive(&self, connection_id: &str, timestamp: i64) {
+        if let Some(mut handle) = self.connections.get_mut(connection_id) {
+            handle.info.last_seen_at = timestamp;
+        }
+    }
+
+    pub fn prune_stale_connections(
+        &self,
+        now_ts: i64,
+        stale_after_seconds: i64,
+    ) -> Vec<ConnectionInfo> {
+        if stale_after_seconds <= 0 {
+            return Vec::new();
+        }
+        let stale_ids: Vec<String> = self
+            .connections
+            .iter()
+            .filter_map(|entry| {
+                let last_seen = entry.value().info.last_seen_at;
+                if now_ts.saturating_sub(last_seen) > stale_after_seconds {
+                    Some(entry.key().clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut evicted = Vec::new();
+        for stale_id in stale_ids {
+            if let Some(info) = self.unregister_connection(&stale_id) {
+                evicted.push(info);
+            }
+        }
+        evicted
     }
 }

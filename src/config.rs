@@ -15,6 +15,9 @@ pub struct Config {
     pub redis_stream: String,
     pub redis_inbox_stream: String,
     pub redis_events_stream: String,
+    pub max_connections_per_user: Option<usize>,
+    pub stale_connection_timeout_seconds: i64,
+    pub stale_prune_interval_seconds: u64,
     pub webtransport_port: u16,
     pub http_api_port: u16,
     pub cert_pemfile: String,
@@ -42,6 +45,9 @@ impl Config {
         let redis_stream = env_str("REDIS_STREAM", "ws.outbox");
         let redis_inbox_stream = env_str("REDIS_INBOX_STREAM", "ws.inbox");
         let redis_events_stream = env_str("REDIS_EVENTS_STREAM", "ws.events");
+        let max_connections_per_user = env_usize("MAX_CONNECTIONS_PER_USER").filter(|value| *value > 0);
+        let stale_connection_timeout_seconds = env_i64("CONNECTION_STALE_SECONDS", 120).max(0);
+        let stale_prune_interval_seconds = env_u64("CONNECTION_PRUNE_INTERVAL_SECONDS", 15).max(1);
 
         let webtransport_port = env_u16("WEBTRANSPORT_PORT", 4433);
         let http_api_port = env_u16("HTTP_API_PORT", 8080);
@@ -62,6 +68,9 @@ impl Config {
             redis_stream,
             redis_inbox_stream,
             redis_events_stream,
+            max_connections_per_user,
+            stale_connection_timeout_seconds,
+            stale_prune_interval_seconds,
             webtransport_port,
             http_api_port,
             cert_pemfile,
@@ -86,4 +95,17 @@ fn env_u16(key: &str, default: u16) -> u16 {
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(default)
+}
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+fn env_usize(key: &str) -> Option<usize> {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
 }

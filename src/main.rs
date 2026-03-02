@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+use serde_json::json;
+use std::time::Duration;
 use tracing::{error, info};
 use wtransport::Identity;
 
@@ -26,7 +28,7 @@ async fn main() -> Result<()> {
         .await
         .context("failed to load TLS identity from PEM files")?;
 
-    let state = state::GatewayState::default();
+    let state = state::GatewayState::new(config.max_connections_per_user);
 
     let webtransport_server =
         webtransport_server::WebTransportServer::new(identity, config.clone(), state.clone())?;
@@ -41,6 +43,47 @@ async fn main() -> Result<()> {
                 broker::start_outbox_consumer(state_clone, config_clone, redis).await;
             });
         }
+    }
+
+    if config.stale_connection_timeout_seconds > 0 {
+        let state_clone = state.clone();
+        let config_clone = config.clone();
+        let redis = if config.redis_dsn.is_empty() {
+            None
+        } else {
+            redis::Client::open(config.redis_dsn.as_str()).ok()
+        };
+
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(config_clone.stale_prune_interval_seconds));
+            loop {
+                interval.tick().await;
+                let now_ts = chrono::Utc::now().timestamp();
+                let evicted = state_clone
+                    .prune_stale_connections(now_ts, config_clone.stale_connection_timeout_seconds);
+                if evicted.is_empty() {
+                    continue;
+                }
+
+                info!(count = evicted.len(), "pruned stale connections");
+
+                if let Some(redis) = redis.as_ref() {
+                    for info in evicted {
+                        let payload = json!({
+                            "type": "disconnected",
+                            "connection_id": info.connection_id,
+                            "user_id": info.user_id,
+                            "subjects": info.subjects,
+                            "connected_at": info.connected_at,
+                        });
+                        let _ =
+                            broker::publish_event(redis, &config_clone.redis_events_stream, &payload)
+                                .await;
+                    }
+                }
+            }
+        });
     }
 
     let wt_task = tokio::spawn(async move { webtransport_server.serve().await });

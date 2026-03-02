@@ -161,10 +161,12 @@ impl WebTransportServer {
                 let connection = connection.clone();
                 tokio::spawn(async move {
                     while let Some(outbound) = outbound_rx.recv().await {
-                        if let OutboundMessage::Text(text) = outbound {
-                            if send_unicast(connection.clone(), &Value::String(text)).await.is_err() {
-                                break;
-                            }
+                        let OutboundMessage::Text(text) = outbound;
+                        if send_unicast(connection.clone(), &Value::String(text))
+                            .await
+                            .is_err()
+                        {
+                            break;
                         }
                     }
                 })
@@ -183,13 +185,29 @@ impl WebTransportServer {
                             continue;
                         }
                         let raw = std::str::from_utf8(&buffer).unwrap_or("").to_string();
-                        handle_client_message(&connection_id, &info, raw, &config, redis.as_ref()).await;
+                        handle_client_message(
+                            &state,
+                            &connection_id,
+                            &info,
+                            raw,
+                            &config,
+                            redis.as_ref(),
+                        )
+                        .await;
                     }
                     dgram = connection.receive_datagram() => {
                         match dgram {
                             Ok(dgram) => {
                                 let raw = std::str::from_utf8(&dgram).unwrap_or("").to_string();
-                                handle_client_message(&connection_id, &info, raw, &config, redis.as_ref()).await;
+                                handle_client_message(
+                                    &state,
+                                    &connection_id,
+                                    &info,
+                                    raw,
+                                    &config,
+                                    redis.as_ref(),
+                                )
+                                .await;
                             }
                             Err(_) => break,
                         }
@@ -260,6 +278,7 @@ async fn send_unicast(connection: Arc<wtransport::Connection>, payload: &Value) 
 }
 
 async fn handle_client_message(
+    state: &GatewayState,
     connection_id: &str,
     info: &crate::state::ConnectionInfo,
     raw: String,
@@ -269,6 +288,8 @@ async fn handle_client_message(
     if raw.trim().is_empty() {
         return;
     }
+    state.mark_connection_alive(connection_id, chrono::Utc::now().timestamp());
+
     let data = serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({"type":"raw","payload":raw}));
     let msg_type = data.get("type").and_then(|v| v.as_str()).unwrap_or("");
     if msg_type == "ping" {
