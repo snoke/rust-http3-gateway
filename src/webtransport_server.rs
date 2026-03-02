@@ -101,6 +101,19 @@ impl WebTransportServer {
                 .get("token")
                 .and_then(|v| v.as_str())
                 .ok_or(AuthError::MissingToken)?;
+            let mut client_instance_id = auth_payload
+                .get("client_instance_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if client_instance_id.len() > 128
+                || !client_instance_id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+            {
+                client_instance_id.clear();
+            }
             let claims = verify_jwt(&config, token).await.map_err(|_| AuthError::InvalidToken)?;
             let user_id = claims
                 .get(&config.jwt_user_id_claim)
@@ -113,12 +126,21 @@ impl WebTransportServer {
 
             let connected_at = chrono::Utc::now().timestamp();
             let subjects = vec![format!("user:{user_id}")];
-            let (info, mut outbound_rx) = state.register_connection(
+            let (info, mut outbound_rx, evicted) = state.register_connection(
                 connection_id.clone(),
                 user_id.clone(),
+                client_instance_id,
                 subjects.clone(),
                 connected_at,
             );
+
+            if !evicted.is_empty() {
+                info!(
+                    "evicted {} stale connection(s) for user '{}'",
+                    evicted.len(),
+                    user_id
+                );
+            }
 
             send_unicast(connection.clone(), &json!({"type":"auth_ok","user_id":user_id})).await?;
 
