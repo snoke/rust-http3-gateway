@@ -5,9 +5,11 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-axum = { version = "0.7", features = ["json"] }
+async-trait = "0.1"
+axum = { version = "0.7", features = ["json", "ws"] }
 dashmap = "6"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+futures-util = "0.3"
 jsonwebtoken = "9"
 redis = { version = "0.25", features = ["tokio-comp"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

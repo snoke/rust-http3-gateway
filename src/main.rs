@@ -1,16 +1,16 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::json;
 use std::time::Duration;
 use tracing::{error, info};
-use wtransport::Identity;
 
 mod auth;
 mod broker;
 mod config;
+mod gateway_core;
 mod http_api;
 mod message;
 mod state;
-mod webtransport_server;
+mod transport;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,21 +19,8 @@ async fn main() -> Result<()> {
         .init();
 
     let config = config::Config::from_env();
-    let cert_pem = config.cert_pemfile.clone();
-    let key_pem = config.key_pemfile.clone();
-
-    // Use a fixed cert/key in dev so the browser can pin the certificate hash (WebTransport
-    // `serverCertificateHashes`) without needing to trust a local CA.
-    let identity = Identity::load_pemfiles(cert_pem, key_pem)
-        .await
-        .context("failed to load TLS identity from PEM files")?;
-
     let state = state::GatewayState::new(config.max_connections_per_user);
-
-    let webtransport_server =
-        webtransport_server::WebTransportServer::new(identity, config.clone(), state.clone())?;
-
-    info!(webtransport_port = webtransport_server.local_port(), "server started");
+    let transport_task = transport::factory::spawn_transport_server(config.clone(), state.clone()).await?;
 
     if !config.redis_dsn.is_empty() {
         if let Ok(redis) = redis::Client::open(config.redis_dsn.as_str()) {
@@ -86,12 +73,11 @@ async fn main() -> Result<()> {
         });
     }
 
-    let wt_task = tokio::spawn(async move { webtransport_server.serve().await });
     let api_task = tokio::spawn(async move { http_api::serve(config.http_api_port, config, state).await });
 
     tokio::select! {
-        result = wt_task => {
-            error!("WebTransport server stopped: {:?}", result);
+        result = transport_task => {
+            error!("Transport server stopped: {:?}", result);
         }
         result = api_task => {
             error!("HTTP API server stopped: {:?}", result);

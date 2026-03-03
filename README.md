@@ -1,12 +1,21 @@
-# Rust HTTP/3 / WebTransport Gateway (Core Mode)
+# Rust Realtime Supergateway (Core Mode)
 
-Stateless Rust gateway that terminates TLS+QUIC (HTTP/3) and accepts browser WebTransport sessions.
+Stateless Rust gateway with a transport-agnostic core and pluggable transport adapters.
 It bridges client events to Redis streams and pushes outbound events back to connected clients.
 
 This gateway is designed for **core mode** (broker-first) and does **not** use webhook/terminator flows.
 
 ## Capabilities
-- WebTransport sessions (HTTP/3) with bidirectional streams + datagrams
+- Shared gateway core for:
+  - AuthN/AuthZ
+  - Event envelope/schema
+  - Presence/subscriptions
+  - Conversation/message routing
+  - Broker integration (Redis streams)
+  - Idempotency/retry primitives
+- Transport adapters:
+  - `webtransport` (HTTP/3 QUIC)
+  - `websocket` (WS)
 - Auth handshake on first client stream (JWT)
 - Redis stream bridge:
   - inbound from clients → `ws.inbox`
@@ -15,11 +24,19 @@ This gateway is designed for **core mode** (broker-first) and does **not** use w
 - Optional HTTP API to publish events to connected clients
 
 ## Transport & Framing
+Set transport via:
+- `GATEWAY_TRANSPORT=webtransport` (default)
+- `GATEWAY_TRANSPORT=websocket`
+
+### WebTransport framing
 **Framing:** one JSON message per stream (no length-prefix).  
 **Client → Gateway:** open a bidirectional stream and write a single JSON payload.  
 **Gateway → Client:** gateway opens a unidirectional stream per message and writes JSON.
 
 Datagrams are supported and are parsed as JSON in the same way.
+
+### WebSocket framing
+One JSON message per text frame.
 
 ## Auth (WebTransport)
 Browsers don’t allow custom headers for WebTransport. The gateway expects:
@@ -78,18 +95,29 @@ Compute a cert pin (base64 SHA‑256):
 openssl x509 -in certs/dev_cert.pem -outform der | openssl dgst -sha256 -binary | base64
 ```
 
-Run:
+Run (WebTransport):
 ```bash
 CERT_PEMFILE=./certs/dev_cert.pem \
 KEY_PEMFILE=./certs/dev_key.pem \
 REDIS_DSN=redis://localhost:6379 \
+GATEWAY_TRANSPORT=webtransport \
 WEBTRANSPORT_PORT=4433 \
+HTTP_API_PORT=8080 \
+cargo run
+```
+
+Run (WebSocket):
+```bash
+REDIS_DSN=redis://localhost:6379 \
+GATEWAY_TRANSPORT=websocket \
+WEBSOCKET_PORT=8081 \
 HTTP_API_PORT=8080 \
 cargo run
 ```
 
 ## Environment Variables
 - `JWT_ALG` (`RS256`/`HS256`/…)
+- `GATEWAY_TRANSPORT` (`webtransport` | `websocket`)
 - `JWT_USER_ID_CLAIM` (default: `user_id`)
 - `JWT_PUBLIC_KEY` or `JWT_PUBLIC_KEY_FILE`
 - `JWT_JWKS_URL` (optional)
@@ -100,6 +128,7 @@ cargo run
 - `REDIS_INBOX_STREAM` (default `ws.inbox`)
 - `REDIS_EVENTS_STREAM` (default `ws.events`)
 - `WEBTRANSPORT_PORT` (default `4433`)
+- `WEBSOCKET_PORT` (default `8081`)
 - `HTTP_API_PORT` (default `8080`)
 - `CERT_PEMFILE` / `KEY_PEMFILE`
 

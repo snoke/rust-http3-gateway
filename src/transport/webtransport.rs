@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,8 +15,10 @@ use wtransport::ServerConfig;
 use crate::auth::{verify_jwt, AuthError};
 use crate::broker::publish_event;
 use crate::config::Config;
-use crate::message::{extract_channel_id, extract_flags, extract_payload, InternalMessage};
+use crate::gateway_core::handle_client_message;
 use crate::state::{GatewayState, OutboundMessage};
+
+use super::TransportAdapter;
 
 pub struct WebTransportServer {
     endpoint: Endpoint<Server>,
@@ -26,6 +28,17 @@ pub struct WebTransportServer {
 }
 
 impl WebTransportServer {
+    pub async fn from_config(config: Config, state: GatewayState) -> Result<Self> {
+        let cert_pem = config.cert_pemfile.clone();
+        let key_pem = config.key_pemfile.clone();
+        // Use a fixed cert/key in dev so the browser can pin the certificate hash (WebTransport
+        // `serverCertificateHashes`) without needing to trust a local CA.
+        let identity = Identity::load_pemfiles(cert_pem, key_pem)
+            .await
+            .context("failed to load TLS identity from PEM files")?;
+        Self::new(identity, config, state)
+    }
+
     pub fn new(identity: Identity, config: Config, state: GatewayState) -> Result<Self> {
         let server_config = ServerConfig::builder()
             .with_bind_default(config.webtransport_port)
@@ -246,6 +259,21 @@ impl WebTransportServer {
     }
 }
 
+#[async_trait::async_trait]
+impl TransportAdapter for WebTransportServer {
+    fn name(&self) -> &'static str {
+        "webtransport"
+    }
+
+    fn local_port(&self) -> u16 {
+        WebTransportServer::local_port(self)
+    }
+
+    async fn serve(self) -> Result<()> {
+        WebTransportServer::serve(self).await
+    }
+}
+
 async fn read_auth_message(connection: Arc<wtransport::Connection>) -> Result<Value> {
     let auth_timeout = tokio::time::sleep(Duration::from_secs(5));
     tokio::pin!(auth_timeout);
@@ -277,55 +305,3 @@ async fn send_unicast(connection: Arc<wtransport::Connection>, payload: &Value) 
     Ok(())
 }
 
-async fn handle_client_message(
-    state: &GatewayState,
-    connection_id: &str,
-    info: &crate::state::ConnectionInfo,
-    raw: String,
-    config: &Config,
-    redis: Option<&redis::Client>,
-) {
-    if raw.trim().is_empty() {
-        return;
-    }
-    state.mark_connection_alive(connection_id, chrono::Utc::now().timestamp());
-
-    let data = serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({"type":"raw","payload":raw}));
-    let msg_type = data.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    if msg_type == "ping" {
-        let _ = redis; // no-op, keep clippy happy
-        return;
-    }
-
-    let timestamp_ms = chrono::Utc::now().timestamp_millis();
-    let internal = InternalMessage {
-        schema_version: 1,
-        internal_id: Uuid::new_v4().to_string(),
-        timestamp_ms,
-        user_id: info.user_id.clone(),
-        channel_id: extract_channel_id(&data, &info.user_id),
-        flags: extract_flags(&data),
-        payload: extract_payload(&data),
-    };
-
-    let payload = json!({
-        "type": "message_received",
-        "internal_id": internal.internal_id,
-        "timestamp_ms": internal.timestamp_ms,
-        "user_id": internal.user_id,
-        "channel_id": internal.channel_id,
-        "flags": internal.flags,
-        "payload": internal.payload,
-        "connection_id": connection_id,
-        "subjects": info.subjects,
-        "connected_at": info.connected_at,
-        "message": data,
-        "raw": raw,
-    });
-
-    if let Some(redis) = redis {
-        if let Err(err) = publish_event(redis, &config.redis_inbox_stream, &payload).await {
-            warn!("publish_event_failed: {err}");
-        }
-    }
-}

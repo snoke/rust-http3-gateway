@@ -2,6 +2,7 @@ use std::fs;
 
 #[derive(Clone)]
 pub struct Config {
+    pub transport: String,
     pub jwt_alg: String,
     pub jwt_user_id_claim: String,
     pub jwt_public_key: String,
@@ -19,6 +20,7 @@ pub struct Config {
     pub stale_connection_timeout_seconds: i64,
     pub stale_prune_interval_seconds: u64,
     pub webtransport_port: u16,
+    pub websocket_port: u16,
     pub http_api_port: u16,
     pub cert_pemfile: String,
     pub key_pemfile: String,
@@ -26,6 +28,7 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
+        let transport = env_str("GATEWAY_TRANSPORT", "webtransport").to_lowercase();
         let jwt_alg = env_str("JWT_ALG", "RS256");
         let jwt_user_id_claim = env_str("JWT_USER_ID_CLAIM", "user_id");
         let jwt_public_key_file = env_str("JWT_PUBLIC_KEY_FILE", "");
@@ -50,11 +53,16 @@ impl Config {
         let stale_prune_interval_seconds = env_u64("CONNECTION_PRUNE_INTERVAL_SECONDS", 15).max(1);
 
         let webtransport_port = env_u16("WEBTRANSPORT_PORT", 4433);
+        let websocket_port = env_u16("WEBSOCKET_PORT", 8081);
         let http_api_port = env_u16("HTTP_API_PORT", 8080);
         let cert_pemfile = env_str("CERT_PEMFILE", "/run/certs/dev_cert.pem");
         let key_pemfile = env_str("KEY_PEMFILE", "/run/certs/dev_key.pem");
 
         Self {
+            transport: match transport.as_str() {
+                "websocket" | "ws" => "websocket".to_string(),
+                _ => "webtransport".to_string(),
+            },
             jwt_alg,
             jwt_user_id_claim,
             jwt_public_key,
@@ -72,6 +80,7 @@ impl Config {
             stale_connection_timeout_seconds,
             stale_prune_interval_seconds,
             webtransport_port,
+            websocket_port,
             http_api_port,
             cert_pemfile,
             key_pemfile,
