@@ -59,24 +59,8 @@ impl GatewayState {
         mpsc::UnboundedReceiver<OutboundMessage>,
         Vec<ConnectionInfo>,
     ) {
-        // Keep only one active connection per client instance (tab/window)
-        // to avoid stale connection accumulation when a single instance reconnects.
-        let stale_ids: Vec<String> = self
-            .connections
-            .iter()
-            .filter_map(|entry| {
-                let existing = &entry.value().info;
-                if existing.user_id != user_id {
-                    None
-                } else if client_instance_id.is_empty() {
-                    None
-                } else if existing.client_instance_id == client_instance_id {
-                    Some(entry.key().clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // Allow multiple simultaneous connections per client instance (multiple tabs/windows)
+        // and only evict by per-user cap when configured.
         let mut same_user_connections: Vec<(String, i64)> = self
             .connections
             .iter()
@@ -90,13 +74,6 @@ impl GatewayState {
             .collect();
         same_user_connections.sort_by_key(|(_, connected_at)| *connected_at);
         let mut evicted = Vec::new();
-        for stale_id in stale_ids {
-            if stale_id != connection_id {
-                if let Some(info) = self.unregister_connection(&stale_id) {
-                    evicted.push(info);
-                }
-            }
-        }
         // Optional cap per user; 0/None means unlimited.
         if let Some(max_connections_per_user) = self.max_connections_per_user {
             if same_user_connections.len() >= max_connections_per_user {
