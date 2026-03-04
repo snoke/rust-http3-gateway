@@ -108,12 +108,20 @@ pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: r
                         .and_then(|value| value.get("type"))
                         .and_then(|value| value.as_str())
                         .unwrap_or("unknown");
+                    let sent_count = state.send_to_subjects(&subjects, text);
                     info!(
                         subject_count = subjects.len(),
+                        sent_count,
                         payload_type,
                         "outbox dispatch"
                     );
-                    state.send_to_subjects(&subjects, text);
+                    if sent_count == 0 {
+                        warn!(
+                            subject_count = subjects.len(),
+                            payload_type,
+                            "outbox delivered to zero connections"
+                        );
+                    }
                 }
             }
         }

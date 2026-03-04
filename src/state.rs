@@ -183,11 +183,9 @@ impl GatewayState {
             }
         }
         let mut stale_ids = Vec::new();
-        let now_ts = chrono::Utc::now().timestamp();
         for id in target_ids {
-            if let Some(mut handle) = self.connections.get_mut(id.as_str()) {
+            if let Some(handle) = self.connections.get(id.as_str()) {
                 if handle.sender.send(OutboundMessage::Text(message.clone())).is_ok() {
-                    handle.info.last_seen_at = now_ts;
                     sent += 1;
                 } else {
                     stale_ids.push(id);

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -170,43 +170,60 @@ impl WebTransportServer {
 
             info!("Session ready; waiting for client data...");
 
-            let _outbound_task = {
-                let connection = connection.clone();
-                tokio::spawn(async move {
-                    while let Some(outbound) = outbound_rx.recv().await {
-                        let OutboundMessage::Text(text) = outbound;
-                        if send_unicast(connection.clone(), &Value::String(text))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                })
-            };
-
             loop {
                 tokio::select! {
+                    outbound = outbound_rx.recv() => {
+                        match outbound {
+                            Some(OutboundMessage::Text(text)) => {
+                                if let Err(err) = send_unicast(connection.clone(), &Value::String(text)).await {
+                                    warn!("outbound send failed for connection {connection_id}: {err}");
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
                     stream = connection.accept_bi() => {
                         let mut stream = match stream {
                             Ok(stream) => stream,
                             Err(_) => break,
                         };
-                        let mut buffer = Vec::new();
-                        stream.1.read_to_end(&mut buffer).await?;
-                        if buffer.is_empty() {
-                            continue;
-                        }
-                        let raw = std::str::from_utf8(&buffer).unwrap_or("").to_string();
-                        handle_client_message(
-                            &state,
-                            &connection_id,
-                            &info,
-                            raw,
-                            &config,
-                            redis.as_ref(),
-                        )
-                        .await;
+                        let state = state.clone();
+                        let connection_id = connection_id.clone();
+                        let info = info.clone();
+                        let config = config.clone();
+                        let redis = redis.clone();
+                        tokio::spawn(async move {
+                            let mut buffer = Vec::new();
+                            let read_result = tokio::time::timeout(
+                                Duration::from_secs(5),
+                                stream.1.read_to_end(&mut buffer),
+                            )
+                            .await;
+                            match read_result {
+                                Ok(Ok(_)) => {
+                                    if buffer.is_empty() {
+                                        return;
+                                    }
+                                    let raw = std::str::from_utf8(&buffer).unwrap_or("").to_string();
+                                    handle_client_message(
+                                        &state,
+                                        &connection_id,
+                                        &info,
+                                        raw,
+                                        &config,
+                                        redis.as_ref(),
+                                    )
+                                    .await;
+                                }
+                                Ok(Err(err)) => {
+                                    warn!("failed reading bi stream for {connection_id}: {err}");
+                                }
+                                Err(_) => {
+                                    warn!("timed out reading bi stream for {connection_id}");
+                                }
+                            }
+                        });
                     }
                     dgram = connection.receive_datagram() => {
                         match dgram {
@@ -299,9 +316,18 @@ async fn send_unicast(connection: Arc<wtransport::Connection>, payload: &Value) 
     } else {
         serde_json::to_string(payload)?
     };
-    let mut stream = connection.open_uni().await?.await?;
-    stream.write_all(text.as_bytes()).await?;
-    stream.finish().await?;
+    let send_result = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut stream = connection.open_uni().await?.await?;
+        stream.write_all(text.as_bytes()).await?;
+        stream.finish().await?;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    match send_result {
+        Ok(inner) => inner?,
+        Err(_) => return Err(anyhow!("webtransport outbound send timeout")),
+    }
     Ok(())
 }
 

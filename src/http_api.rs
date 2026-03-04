@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use tower_http::cors::CorsLayer;
 use tracing::info;
 
 use crate::config::Config;
@@ -38,6 +39,7 @@ pub async fn serve(port: u16, config: Config, gateway: GatewayState) -> anyhow::
         .route("/internal/users/:user_id/connections", get(user_connections))
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .layer(CorsLayer::permissive())
         .with_state(app_state);
 
     let bind = format!("0.0.0.0:{port}");
