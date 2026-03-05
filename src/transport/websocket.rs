@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
@@ -24,12 +24,6 @@ struct WsAppState {
     state: GatewayState,
     config: Config,
     redis: Option<redis::Client>,
-}
-
-#[derive(Default, serde::Deserialize)]
-struct WsAuthQuery {
-    token: Option<String>,
-    client_instance_id: Option<String>,
 }
 
 pub struct WebSocketServer {
@@ -63,9 +57,7 @@ impl WebSocketServer {
     }
 
     pub async fn serve(self) -> Result<()> {
-        let router = Router::new()
-            .route("/ws", get(ws_upgrade))
-            .with_state(self.app.clone());
+        let router = Router::new().route("/ws", get(ws_upgrade)).with_state(self.app.clone());
 
         info!("WebSocket listening on TCP port {}", self.local_port());
         axum::serve(self.listener, router).await?;
@@ -73,18 +65,14 @@ impl WebSocketServer {
     }
 }
 
-async fn ws_upgrade(
-    ws: WebSocketUpgrade,
-    State(app): State<WsAppState>,
-    Query(query): Query<WsAuthQuery>,
-) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, app, query))
+async fn ws_upgrade(ws: WebSocketUpgrade, State(app): State<WsAppState>) -> Response {
+    ws.on_upgrade(move |socket| handle_socket(socket, app))
 }
 
-async fn handle_socket(socket: WebSocket, app: WsAppState, query: WsAuthQuery) {
+async fn handle_socket(socket: WebSocket, app: WsAppState) {
     let connection_id = Uuid::new_v4().to_string();
 
-    let result = handle_socket_impl(socket, &connection_id, app.clone(), query).await;
+    let result = handle_socket_impl(socket, &connection_id, app.clone()).await;
 
     if let Some(info) = app.state.unregister_connection(&connection_id) {
         if let Some(redis) = app.redis.as_ref() {
@@ -108,30 +96,22 @@ async fn handle_socket_impl(
     mut socket: WebSocket,
     connection_id: &str,
     app: WsAppState,
-    query: WsAuthQuery,
 ) -> Result<()> {
-    let (token, mut client_instance_id) = if let Some(raw_token) = query.token.as_deref() {
-        (
-            normalize_bearer_token(raw_token).to_string(),
-            query.client_instance_id.unwrap_or_default(),
-        )
-    } else {
-        let auth_payload = read_auth_message(&mut socket).await?;
-        if auth_payload.get("type").and_then(|v| v.as_str()) != Some("auth") {
-            return Err(AuthError::InvalidToken.into());
-        }
-        let token = auth_payload
-            .get("token")
-            .and_then(|v| v.as_str())
-            .ok_or(AuthError::MissingToken)?
-            .to_string();
-        let client_instance_id = auth_payload
-            .get("client_instance_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        (token, client_instance_id)
-    };
+    let auth_payload = read_auth_message(&mut socket).await?;
+    if auth_payload.get("type").and_then(|v| v.as_str()) != Some("auth") {
+        return Err(AuthError::InvalidToken.into());
+    }
+
+    let token = auth_payload
+        .get("token")
+        .and_then(|v| v.as_str())
+        .ok_or(AuthError::MissingToken)?;
+    let token = normalize_bearer_token(token).to_string();
+    let mut client_instance_id = auth_payload
+        .get("client_instance_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     client_instance_id = client_instance_id.trim().to_string();
     if client_instance_id.len() > 128
@@ -141,7 +121,10 @@ async fn handle_socket_impl(
     {
         client_instance_id.clear();
     }
-    let claims = verify_jwt(&app.config, &token).await.map_err(|_| AuthError::InvalidToken)?;
+
+    let claims = verify_jwt(&app.config, &token)
+        .await
+        .map_err(|_| AuthError::InvalidToken)?;
     let user_id = claims
         .get(&app.config.jwt_user_id_claim)
         .and_then(|v| v.as_str())
@@ -163,7 +146,7 @@ async fn handle_socket_impl(
 
     socket
         .send(WsMessage::Text(
-            json!({"type":"auth_ok","user_id":user_id}).to_string(),
+            json!({"type":"auth_ok","user_id":user_id}).to_string().into(),
         ))
         .await?;
 
@@ -184,7 +167,7 @@ async fn handle_socket_impl(
             outbound = outbound_rx.recv() => {
                 match outbound {
                     Some(OutboundMessage::Text(text)) => {
-                        if sender.send(WsMessage::Text(text)).await.is_err() {
+                        if sender.send(WsMessage::Text(text.into())).await.is_err() {
                             break;
                         }
                     }
@@ -262,4 +245,3 @@ impl TransportAdapter for WebSocketServer {
         WebSocketServer::serve(self).await
     }
 }
-

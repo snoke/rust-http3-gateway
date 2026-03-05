@@ -1,8 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tracing::{info, warn};
 use tracing::{info_span, Instrument};
 use uuid::Uuid;
@@ -104,9 +103,17 @@ impl WebTransportServer {
                 session_request.path()
             );
             let connection = session_request.accept().await?;
-            let connection = Arc::new(connection);
 
-            let auth_payload = read_auth_message(connection.clone()).await?;
+            // WS-like control channel:
+            // - one persistent bidirectional stream per session
+            // - line-delimited JSON frames in both directions
+            let control = tokio::time::timeout(Duration::from_secs(5), connection.accept_bi())
+                .await
+                .map_err(|_| anyhow!("auth_timeout"))??;
+            let mut control_send = control.0;
+            let mut control_reader = BufReader::new(control.1);
+
+            let auth_payload = read_auth_message(&mut control_reader).await?;
             if auth_payload.get("type").and_then(|v| v.as_str()) != Some("auth") {
                 return Err(AuthError::InvalidToken.into());
             }
@@ -155,7 +162,7 @@ impl WebTransportServer {
                 );
             }
 
-            send_unicast(connection.clone(), &json!({"type":"auth_ok","user_id":user_id})).await?;
+            send_unicast(&mut control_send, &json!({"type":"auth_ok","user_id":user_id})).await?;
 
             if let Some(redis) = redis.as_ref() {
                 let payload = json!({
@@ -175,7 +182,7 @@ impl WebTransportServer {
                     outbound = outbound_rx.recv() => {
                         match outbound {
                             Some(OutboundMessage::Text(text)) => {
-                                if let Err(err) = send_unicast(connection.clone(), &Value::String(text)).await {
+                                if let Err(err) = send_unicast(&mut control_send, &Value::String(text)).await {
                                     warn!("outbound send failed for connection {connection_id}: {err}");
                                     break;
                                 }
@@ -183,52 +190,12 @@ impl WebTransportServer {
                             None => break,
                         }
                     }
-                    stream = connection.accept_bi() => {
-                        let mut stream = match stream {
-                            Ok(stream) => stream,
-                            Err(_) => break,
-                        };
-                        let state = state.clone();
-                        let connection_id = connection_id.clone();
-                        let info = info.clone();
-                        let config = config.clone();
-                        let redis = redis.clone();
-                        tokio::spawn(async move {
-                            let mut buffer = Vec::new();
-                            let read_result = tokio::time::timeout(
-                                Duration::from_secs(5),
-                                stream.1.read_to_end(&mut buffer),
-                            )
-                            .await;
-                            match read_result {
-                                Ok(Ok(_)) => {
-                                    if buffer.is_empty() {
-                                        return;
-                                    }
-                                    let raw = std::str::from_utf8(&buffer).unwrap_or("").to_string();
-                                    handle_client_message(
-                                        &state,
-                                        &connection_id,
-                                        &info,
-                                        raw,
-                                        &config,
-                                        redis.as_ref(),
-                                    )
-                                    .await;
+                    incoming = read_framed_message(&mut control_reader) => {
+                        match incoming {
+                            Ok(Some(raw)) => {
+                                if raw.is_empty() {
+                                    continue;
                                 }
-                                Ok(Err(err)) => {
-                                    warn!("failed reading bi stream for {connection_id}: {err}");
-                                }
-                                Err(_) => {
-                                    warn!("timed out reading bi stream for {connection_id}");
-                                }
-                            }
-                        });
-                    }
-                    dgram = connection.receive_datagram() => {
-                        match dgram {
-                            Ok(dgram) => {
-                                let raw = std::str::from_utf8(&dgram).unwrap_or("").to_string();
                                 handle_client_message(
                                     &state,
                                     &connection_id,
@@ -239,7 +206,11 @@ impl WebTransportServer {
                                 )
                                 .await;
                             }
-                            Err(_) => break,
+                            Ok(None) => break,
+                            Err(err) => {
+                                warn!("failed reading control stream for {connection_id}: {err}");
+                                break;
+                            }
                         }
                     }
                 }
@@ -291,43 +262,51 @@ impl TransportAdapter for WebTransportServer {
     }
 }
 
-async fn read_auth_message(connection: Arc<wtransport::Connection>) -> Result<Value> {
+async fn read_auth_message<R>(reader: &mut R) -> Result<Value>
+where
+    R: AsyncBufRead + Unpin,
+{
     let auth_timeout = tokio::time::sleep(Duration::from_secs(5));
     tokio::pin!(auth_timeout);
 
     tokio::select! {
         _ = &mut auth_timeout => {
-            Err(anyhow::anyhow!("auth_timeout"))
+            Err(anyhow!("auth_timeout"))
         }
-        stream = connection.accept_bi() => {
-            let mut stream = stream?;
-            let mut buffer = Vec::new();
-            stream.1.read_to_end(&mut buffer).await?;
-            let raw = std::str::from_utf8(&buffer).unwrap_or("");
-            let payload: Value = serde_json::from_str(raw)?;
-            Ok(payload)
+        msg = read_framed_message(reader) => {
+            match msg? {
+                Some(raw) => Ok(serde_json::from_str::<Value>(&raw)?),
+                None => Err(anyhow!("missing_auth_payload")),
+            }
         }
     }
 }
 
-async fn send_unicast(connection: Arc<wtransport::Connection>, payload: &Value) -> Result<()> {
+async fn send_unicast<W>(send: &mut W, payload: &Value) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     let text = if payload.is_string() {
         payload.as_str().unwrap_or("").to_string()
     } else {
         serde_json::to_string(payload)?
     };
-    let send_result = tokio::time::timeout(Duration::from_secs(3), async {
-        let mut stream = connection.open_uni().await?.await?;
-        stream.write_all(text.as_bytes()).await?;
-        stream.finish().await?;
-        Ok::<(), anyhow::Error>(())
-    })
-    .await;
-
-    match send_result {
-        Ok(inner) => inner?,
-        Err(_) => return Err(anyhow!("webtransport outbound send timeout")),
-    }
+    send.write_all(text.as_bytes()).await?;
+    send.write_all(b"\n").await?;
+    send.flush().await?;
     Ok(())
 }
 
+async fn read_framed_message<R>(reader: &mut R) -> Result<Option<String>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut line = String::new();
+    let bytes_read = reader.read_line(&mut line).await?;
+    if bytes_read == 0 {
+        return Ok(None);
+    }
+    Ok(Some(
+        line.trim_end_matches(['\n', '\r']).trim().to_string(),
+    ))
+}
