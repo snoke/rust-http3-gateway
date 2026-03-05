@@ -31,8 +31,6 @@ impl WebTransportServer {
     pub async fn from_config(config: Config, state: GatewayState) -> Result<Self> {
         let cert_pem = config.cert_pemfile.clone();
         let key_pem = config.key_pemfile.clone();
-        // Use a fixed cert/key in dev so the browser can pin the certificate hash (WebTransport
-        // `serverCertificateHashes`) without needing to trust a local CA.
         let identity = Identity::load_pemfiles(cert_pem, key_pem)
             .await
             .context("failed to load TLS identity from PEM files")?;
@@ -98,28 +96,40 @@ impl WebTransportServer {
             redis: Option<redis::Client>,
         ) -> Result<()> {
             let session_request = incoming_session.await?;
+            let authority = session_request.authority().to_string();
+            let path = session_request.path().to_string();
             info!(
                 "New session: id='{connection_id}' authority='{}' path='{}'",
-                session_request.authority(),
-                session_request.path()
+                authority,
+                path
             );
-            let connection = session_request.accept().await?;
-            let connection = Arc::new(connection);
 
-            let auth_payload = read_auth_message(connection.clone()).await?;
-            if auth_payload.get("type").and_then(|v| v.as_str()) != Some("auth") {
-                return Err(AuthError::InvalidToken.into());
-            }
-            let token = auth_payload
-                .get("token")
-                .and_then(|v| v.as_str())
-                .ok_or(AuthError::MissingToken)?;
-            let mut client_instance_id = auth_payload
-                .get("client_instance_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
+            let connection = Arc::new(session_request.accept().await?);
+
+            let (token, mut client_instance_id) = if let Some(raw_token) = query_param(&path, "token") {
+                (
+                    normalize_bearer_token(&raw_token).to_string(),
+                    query_param(&path, "client_instance_id").unwrap_or_default(),
+                )
+            } else {
+                let auth_payload = read_auth_message(connection.clone()).await?;
+                if auth_payload.get("type").and_then(|v| v.as_str()) != Some("auth") {
+                    return Err(AuthError::InvalidToken.into());
+                }
+                let token = auth_payload
+                    .get("token")
+                    .and_then(|v| v.as_str())
+                    .ok_or(AuthError::MissingToken)?
+                    .to_string();
+                let client_instance_id = auth_payload
+                    .get("client_instance_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                (token, client_instance_id)
+            };
+
+            client_instance_id = client_instance_id.trim().to_string();
             if client_instance_id.len() > 128
                 || !client_instance_id
                     .chars()
@@ -127,7 +137,8 @@ impl WebTransportServer {
             {
                 client_instance_id.clear();
             }
-            let claims = verify_jwt(&config, token).await.map_err(|_| AuthError::InvalidToken)?;
+
+            let claims = verify_jwt(&config, &token).await.map_err(|_| AuthError::InvalidToken)?;
             let user_id = claims
                 .get(&config.jwt_user_id_claim)
                 .and_then(|v| v.as_str())
@@ -175,60 +186,35 @@ impl WebTransportServer {
                     outbound = outbound_rx.recv() => {
                         match outbound {
                             Some(OutboundMessage::Text(text)) => {
-                                if let Err(err) = send_unicast(connection.clone(), &Value::String(text)).await {
+                                if let Err(err) = send_unicast(connection.clone(), &Value::String(text.clone())).await {
                                     warn!("outbound send failed for connection {connection_id}: {err}");
+                                    // Preserve messages that were dequeued for this connection but not delivered.
+                                    state.requeue_for_subjects(&info.subjects, text);
                                     break;
                                 }
                             }
                             None => break,
                         }
                     }
-                    stream = connection.accept_bi() => {
+                    stream = connection.accept_uni() => {
                         let mut stream = match stream {
                             Ok(stream) => stream,
                             Err(_) => break,
                         };
-                        let state = state.clone();
-                        let connection_id = connection_id.clone();
-                        let info = info.clone();
-                        let config = config.clone();
-                        let redis = redis.clone();
-                        tokio::spawn(async move {
-                            let mut buffer = Vec::new();
-                            let read_result = tokio::time::timeout(
-                                Duration::from_secs(5),
-                                stream.1.read_to_end(&mut buffer),
-                            )
-                            .await;
-                            match read_result {
-                                Ok(Ok(_)) => {
-                                    if buffer.is_empty() {
-                                        return;
-                                    }
-                                    let raw = std::str::from_utf8(&buffer).unwrap_or("").to_string();
-                                    handle_client_message(
-                                        &state,
-                                        &connection_id,
-                                        &info,
-                                        raw,
-                                        &config,
-                                        redis.as_ref(),
-                                    )
-                                    .await;
+
+                        let mut buffer = Vec::new();
+                        let read_result = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            stream.read_to_end(&mut buffer),
+                        )
+                        .await;
+
+                        match read_result {
+                            Ok(Ok(_)) => {
+                                if buffer.is_empty() {
+                                    continue;
                                 }
-                                Ok(Err(err)) => {
-                                    warn!("failed reading bi stream for {connection_id}: {err}");
-                                }
-                                Err(_) => {
-                                    warn!("timed out reading bi stream for {connection_id}");
-                                }
-                            }
-                        });
-                    }
-                    dgram = connection.receive_datagram() => {
-                        match dgram {
-                            Ok(dgram) => {
-                                let raw = std::str::from_utf8(&dgram).unwrap_or("").to_string();
+                                let raw = std::str::from_utf8(&buffer).unwrap_or("").to_string();
                                 handle_client_message(
                                     &state,
                                     &connection_id,
@@ -239,7 +225,14 @@ impl WebTransportServer {
                                 )
                                 .await;
                             }
-                            Err(_) => break,
+                            Ok(Err(err)) => {
+                                warn!("failed reading uni stream for {connection_id}: {err}");
+                                break;
+                            }
+                            Err(_) => {
+                                warn!("timed out reading uni stream for {connection_id}");
+                                break;
+                            }
                         }
                     }
                 }
@@ -291,18 +284,33 @@ impl TransportAdapter for WebTransportServer {
     }
 }
 
+fn normalize_bearer_token(token: &str) -> &str {
+    token.trim().strip_prefix("Bearer ").unwrap_or(token).trim()
+}
+
+fn query_param(path: &str, key: &str) -> Option<String> {
+    let query = path.split_once('?')?.1;
+    for pair in query.split('&') {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        if k == key {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
 async fn read_auth_message(connection: Arc<wtransport::Connection>) -> Result<Value> {
     let auth_timeout = tokio::time::sleep(Duration::from_secs(5));
     tokio::pin!(auth_timeout);
 
     tokio::select! {
         _ = &mut auth_timeout => {
-            Err(anyhow::anyhow!("auth_timeout"))
+            Err(anyhow!("auth_timeout"))
         }
-        stream = connection.accept_bi() => {
+        stream = connection.accept_uni() => {
             let mut stream = stream?;
             let mut buffer = Vec::new();
-            stream.1.read_to_end(&mut buffer).await?;
+            stream.read_to_end(&mut buffer).await?;
             let raw = std::str::from_utf8(&buffer).unwrap_or("");
             let payload: Value = serde_json::from_str(raw)?;
             Ok(payload)
@@ -330,4 +338,3 @@ async fn send_unicast(connection: Arc<wtransport::Connection>, payload: &Value) 
     }
     Ok(())
 }
-

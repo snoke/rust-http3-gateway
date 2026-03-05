@@ -20,6 +20,31 @@ pub async fn publish_event(
     Ok(())
 }
 
+fn sticky_snapshot_key(payload: &Value) -> Option<String> {
+    let payload_type = payload.get("type").and_then(|value| value.as_str())?;
+    match payload_type {
+        "users" | "contacts" | "conversations" | "bootstrap_snapshot" | "bootstrap_done" => {
+            Some(payload_type.to_string())
+        }
+        // Keep only the most recent history response per conversation for reconnects.
+        "messages" => {
+            let conversation_id = payload
+                .get("conversation_id")
+                .and_then(|value| value.as_i64())
+                .or_else(|| payload.get("conversation_id").and_then(|value| value.as_u64().map(|id| id as i64)));
+            match conversation_id {
+                Some(id) => Some(format!("messages:{id}")),
+                None => Some("messages".to_string()),
+            }
+        }
+        _ => None,
+    }
+}
+
+fn should_buffer_on_zero(payload_type: &str) -> bool {
+    !matches!(payload_type, "typing" | "presence" | "presence_state")
+}
+
 pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: redis::Client) {
     if config.redis_dsn.is_empty() {
         warn!("redis.dsn missing; outbox consumer disabled");
@@ -103,22 +128,34 @@ pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: r
                     "payload": payload,
                 });
                 if let Ok(text) = serde_json::to_string(&envelope) {
-                    let payload_type = decoded
-                        .get("payload")
-                        .and_then(|value| value.get("type"))
+                    let payload_type = payload
+                        .get("type")
                         .and_then(|value| value.as_str())
                         .unwrap_or("unknown");
-                    let sent_count = state.send_to_subjects(&subjects, text);
+                    let sticky_key = sticky_snapshot_key(&payload);
+                    let buffered_on_zero = sticky_key.is_none() && should_buffer_on_zero(payload_type);
+                    let sent_count = state.send_to_subjects(
+                        &subjects,
+                        text,
+                        buffered_on_zero,
+                        sticky_key.as_deref(),
+                    );
                     info!(
                         subject_count = subjects.len(),
                         sent_count,
                         payload_type,
+                        buffered_on_zero,
+                        sticky_buffered = sticky_key.is_some(),
+                        sticky_key = sticky_key.as_deref().unwrap_or(""),
                         "outbox dispatch"
                     );
                     if sent_count == 0 {
                         warn!(
                             subject_count = subjects.len(),
                             payload_type,
+                            buffered_on_zero,
+                            sticky_buffered = sticky_key.is_some(),
+                            sticky_key = sticky_key.as_deref().unwrap_or(""),
                             "outbox delivered to zero connections"
                         );
                     }
