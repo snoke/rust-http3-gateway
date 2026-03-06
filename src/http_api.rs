@@ -81,8 +81,15 @@ async fn publish(
     });
     match serde_json::to_string(&envelope) {
         Ok(text) => {
-            let sent = state.gateway.send_to_subjects(&subjects, text, true, None);
-            (StatusCode::OK, Json(json!({ "ok": true, "sent": sent })))
+            let dispatch = state.gateway.send_to_subjects(&subjects, text, true, None);
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "attempted": dispatch.attempted_count,
+                    "enqueued": dispatch.enqueued_count,
+                })),
+            )
         }
         Err(_) => (
             StatusCode::BAD_REQUEST,

@@ -10,6 +10,12 @@ pub enum OutboundMessage {
     Text(String),
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct DispatchResult {
+    pub attempted_count: usize,
+    pub enqueued_count: usize,
+}
+
 #[derive(Clone, Debug)]
 struct PendingMessage {
     text: String,
@@ -17,8 +23,17 @@ struct PendingMessage {
     sticky_key: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct RequestRoute {
+    connection_id: String,
+    user_id: String,
+    updated_at: i64,
+}
+
 const PENDING_MAX_PER_SUBJECT: usize = 256;
 const PENDING_TTL_SECONDS: i64 = 30;
+const REQUEST_ROUTE_TTL_SECONDS: i64 = 120;
+const REQUEST_ROUTE_MAX: usize = 8_192;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ConnectionInfo {
@@ -41,6 +56,7 @@ pub struct GatewayState {
     connections: Arc<DashMap<String, ConnectionHandle>>,
     subjects: Arc<DashMap<String, DashSet<String>>>,
     pending_by_subject: Arc<DashMap<String, VecDeque<PendingMessage>>>,
+    request_routes: Arc<DashMap<String, RequestRoute>>,
     max_connections_per_user: Option<usize>,
 }
 
@@ -56,6 +72,7 @@ impl GatewayState {
             connections: Arc::new(DashMap::new()),
             subjects: Arc::new(DashMap::new()),
             pending_by_subject: Arc::new(DashMap::new()),
+            request_routes: Arc::new(DashMap::new()),
             max_connections_per_user,
         }
     }
@@ -80,26 +97,41 @@ impl GatewayState {
         }
     }
 
-    fn snapshot_pending_for_subjects(&self, subjects: &[String]) -> Vec<String> {
+
+    fn prune_request_routes(&self, now_ts: i64) {
+        if self.request_routes.len() <= REQUEST_ROUTE_MAX {
+            return;
+        }
+
+        let mut stale_keys = Vec::new();
+        for entry in self.request_routes.iter() {
+            let route = entry.value();
+            if now_ts.saturating_sub(route.updated_at) > REQUEST_ROUTE_TTL_SECONDS
+                || !self.connections.contains_key(route.connection_id.as_str())
+            {
+                stale_keys.push(entry.key().clone());
+            }
+        }
+
+        for key in stale_keys {
+            self.request_routes.remove(key.as_str());
+        }
+    }
+
+    fn take_pending_for_subjects(&self, subjects: &[String]) -> Vec<String> {
         let mut snapshot = Vec::new();
         let mut seen = HashSet::new();
         let now_ts = Self::now_unix_seconds();
-        let mut empty_subjects = Vec::new();
         for subject in subjects {
-            if let Some(mut queue) = self.pending_by_subject.get_mut(subject) {
+            if let Some((_, mut queue)) = self.pending_by_subject.remove(subject) {
                 Self::prune_pending_queue(&mut queue, now_ts);
-                for item in queue.iter() {
+                while let Some(item) = queue.pop_front() {
                     if seen.insert(item.text.clone()) {
-                        snapshot.push(item.text.clone());
+                        snapshot.push(item.text);
                     }
                 }
-                if queue.is_empty() {
-                    empty_subjects.push(subject.clone());
-                }
+                // Pending messages are one-shot reconnect replay, not sticky snapshots.
             }
-        }
-        for subject in empty_subjects {
-            self.pending_by_subject.remove(&subject);
         }
         snapshot
     }
@@ -121,6 +153,76 @@ impl GatewayState {
             });
             Self::prune_pending_queue(&mut queue, now_ts);
         }
+    }
+
+
+    pub fn bind_request_route(&self, request_id: &str, connection_id: &str, user_id: &str) {
+        let request_id = request_id.trim();
+        if request_id.is_empty() || connection_id.is_empty() || user_id.is_empty() {
+            return;
+        }
+
+        let now_ts = Self::now_unix_seconds();
+        self.request_routes.insert(
+            request_id.to_string(),
+            RequestRoute {
+                connection_id: connection_id.to_string(),
+                user_id: user_id.to_string(),
+                updated_at: now_ts,
+            },
+        );
+        self.prune_request_routes(now_ts);
+    }
+
+    pub fn clear_request_route(&self, request_id: &str) {
+        let request_id = request_id.trim();
+        if request_id.is_empty() {
+            return;
+        }
+        self.request_routes.remove(request_id);
+    }
+
+    pub fn resolve_request_route(&self, request_id: &str, subjects: &[String]) -> Option<String> {
+        let request_id = request_id.trim();
+        if request_id.is_empty() {
+            return None;
+        }
+
+        let now_ts = Self::now_unix_seconds();
+        let route = self.request_routes.get(request_id)?;
+        if now_ts.saturating_sub(route.updated_at) > REQUEST_ROUTE_TTL_SECONDS {
+            drop(route);
+            self.request_routes.remove(request_id);
+            return None;
+        }
+
+        let connection_id = route.connection_id.clone();
+        let user_id = route.user_id.clone();
+        drop(route);
+
+        let handle = match self.connections.get(connection_id.as_str()) {
+            Some(handle) => handle,
+            None => {
+                self.request_routes.remove(request_id);
+                return None;
+            }
+        };
+
+        if handle.info.user_id != user_id {
+            self.request_routes.remove(request_id);
+            return None;
+        }
+
+        if !subjects.is_empty() {
+            let matches_subject = subjects
+                .iter()
+                .any(|subject| handle.info.subjects.iter().any(|item| item == subject));
+            if !matches_subject {
+                return None;
+            }
+        }
+
+        Some(connection_id)
     }
 
     pub fn buffer_latest_for_subjects(&self, subjects: &[String], message: String, sticky_key: &str) {
@@ -231,7 +333,7 @@ impl GatewayState {
             let entry = self.subjects.entry(subject).or_insert_with(DashSet::new);
             entry.insert(connection_id.clone());
         }
-        for text in self.snapshot_pending_for_subjects(&info.subjects) {
+        for text in self.take_pending_for_subjects(&info.subjects) {
             let _ = tx.send(OutboundMessage::Text(text));
         }
         (info, rx, evicted)
@@ -249,6 +351,17 @@ impl GatewayState {
                     }
                 }
             }
+
+            let mut stale_request_ids = Vec::new();
+            for entry in self.request_routes.iter() {
+                if entry.value().connection_id == connection_id {
+                    stale_request_ids.push(entry.key().clone());
+                }
+            }
+            for request_id in stale_request_ids {
+                self.request_routes.remove(request_id.as_str());
+            }
+
             return Some(handle.info);
         }
         None
@@ -283,16 +396,16 @@ impl GatewayState {
         message: String,
         buffer_if_undelivered: bool,
         sticky_key: Option<&str>,
-    ) -> usize {
+    ) -> DispatchResult {
         if subjects.is_empty() || message.is_empty() {
-            return 0;
+            return DispatchResult::default();
         }
 
         if let Some(key) = sticky_key {
             self.buffer_latest_for_subjects(subjects, message.clone(), key);
         }
 
-        let mut sent = 0usize;
+        let mut enqueued = 0usize;
         let mut target_ids = HashSet::new();
         for subject in subjects {
             if let Some(ids) = self.subjects.get(subject) {
@@ -301,12 +414,13 @@ impl GatewayState {
                 }
             }
         }
+        let attempted = target_ids.len();
 
         let mut stale_ids = Vec::new();
         for id in target_ids {
             if let Some(handle) = self.connections.get(id.as_str()) {
                 if handle.sender.send(OutboundMessage::Text(message.clone())).is_ok() {
-                    sent += 1;
+                    enqueued += 1;
                 } else {
                     stale_ids.push(id);
                 }
@@ -319,13 +433,32 @@ impl GatewayState {
             let _ = self.unregister_connection(&stale_id);
         }
 
-        if sent == 0 && buffer_if_undelivered {
+        if enqueued == 0 && buffer_if_undelivered {
             self.requeue_for_subjects(subjects, message);
         }
 
-        sent
+        DispatchResult {
+            attempted_count: attempted,
+            enqueued_count: enqueued,
+        }
     }
 
+
+
+    pub fn send_to_connection(&self, connection_id: &str, message: String) -> bool {
+        if connection_id.is_empty() || message.is_empty() {
+            return false;
+        }
+
+        if let Some(handle) = self.connections.get(connection_id) {
+            if handle.sender.send(OutboundMessage::Text(message)).is_ok() {
+                return true;
+            }
+        }
+
+        let _ = self.unregister_connection(connection_id);
+        false
+    }
     pub fn mark_connection_alive(&self, connection_id: &str, timestamp: i64) {
         if let Some(mut handle) = self.connections.get_mut(connection_id) {
             handle.info.last_seen_at = timestamp;

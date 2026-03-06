@@ -2,7 +2,31 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 
 use crate::config::Config;
-use crate::state::GatewayState;
+use crate::state::{DispatchResult, GatewayState};
+
+#[derive(Clone, Copy, Debug)]
+enum DeliveryMode {
+    RequestResponse,
+    Push,
+}
+
+impl DeliveryMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RequestResponse => "request_response",
+            Self::Push => "push",
+        }
+    }
+}
+
+fn extract_request_id(payload: &Value) -> Option<String> {
+    payload
+        .get("request_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+}
 
 pub async fn publish_event(
     redis: &redis::Client,
@@ -18,31 +42,6 @@ pub async fn publish_event(
     cmd.arg(stream).arg("*").arg("data").arg(body);
     let _: () = cmd.query_async(&mut conn).await?;
     Ok(())
-}
-
-fn sticky_snapshot_key(payload: &Value) -> Option<String> {
-    let payload_type = payload.get("type").and_then(|value| value.as_str())?;
-    match payload_type {
-        "users" | "contacts" | "conversations" | "bootstrap_snapshot" | "bootstrap_done" => {
-            Some(payload_type.to_string())
-        }
-        // Keep only the most recent history response per conversation for reconnects.
-        "messages" => {
-            let conversation_id = payload
-                .get("conversation_id")
-                .and_then(|value| value.as_i64())
-                .or_else(|| payload.get("conversation_id").and_then(|value| value.as_u64().map(|id| id as i64)));
-            match conversation_id {
-                Some(id) => Some(format!("messages:{id}")),
-                None => Some("messages".to_string()),
-            }
-        }
-        _ => None,
-    }
-}
-
-fn should_buffer_on_zero(payload_type: &str) -> bool {
-    !matches!(payload_type, "typing" | "presence" | "presence_state")
 }
 
 pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: redis::Client) {
@@ -122,41 +121,82 @@ pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: r
                 if subjects.is_empty() {
                     continue;
                 }
+
                 let payload = decoded.get("payload").cloned().unwrap_or(Value::Null);
+                let request_id = extract_request_id(&payload);
+                let delivery_mode = if request_id.is_some() {
+                    DeliveryMode::RequestResponse
+                } else {
+                    DeliveryMode::Push
+                };
+                let buffer_if_undelivered = matches!(delivery_mode, DeliveryMode::Push);
+
                 let envelope = json!({
                     "type": "event",
                     "payload": payload,
                 });
+
                 if let Ok(text) = serde_json::to_string(&envelope) {
-                    let payload_type = payload
-                        .get("type")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("unknown");
-                    let sticky_key = sticky_snapshot_key(&payload);
-                    let buffered_on_zero = sticky_key.is_none() && should_buffer_on_zero(payload_type);
-                    let sent_count = state.send_to_subjects(
-                        &subjects,
-                        text,
-                        buffered_on_zero,
-                        sticky_key.as_deref(),
-                    );
+                    let mut route_found = false;
+                    let mut routed_connection_id: Option<String> = None;
+                    let dispatch_result = match delivery_mode {
+                        DeliveryMode::RequestResponse => {
+                            let mut result = DispatchResult {
+                                attempted_count: 0,
+                                enqueued_count: 0,
+                            };
+                            if let Some(req_id) = request_id.as_deref() {
+                                if let Some(connection_id) = state.resolve_request_route(req_id, &subjects) {
+                                    route_found = true;
+                                    result.attempted_count = 1;
+                                    routed_connection_id = Some(connection_id.clone());
+                                    if state.send_to_connection(connection_id.as_str(), text.clone()) {
+                                        result.enqueued_count = 1;
+                                    } else {
+                                        state.clear_request_route(req_id);
+                                    }
+                                }
+                            }
+                            result
+                        }
+                        DeliveryMode::Push => {
+                            state.send_to_subjects(&subjects, text.clone(), buffer_if_undelivered, None)
+                        }
+                    };
+
                     info!(
                         subject_count = subjects.len(),
-                        sent_count,
-                        payload_type,
-                        buffered_on_zero,
-                        sticky_buffered = sticky_key.is_some(),
-                        sticky_key = sticky_key.as_deref().unwrap_or(""),
+                        dispatch_attempts = dispatch_result.attempted_count,
+                        enqueued_count = dispatch_result.enqueued_count,
+                        dispatch_mode = delivery_mode.as_str(),
+                        delivery_scope = if matches!(delivery_mode, DeliveryMode::RequestResponse) {
+                            "connection"
+                        } else {
+                            "subjects"
+                        },
+                        request_id = request_id.as_deref().unwrap_or(""),
+                        route_found,
+                        routed_connection_id = routed_connection_id.as_deref().unwrap_or(""),
+                        buffer_if_undelivered,
                         "outbox dispatch"
                     );
-                    if sent_count == 0 {
+
+                    if dispatch_result.enqueued_count == 0 {
                         warn!(
                             subject_count = subjects.len(),
-                            payload_type,
-                            buffered_on_zero,
-                            sticky_buffered = sticky_key.is_some(),
-                            sticky_key = sticky_key.as_deref().unwrap_or(""),
-                            "outbox delivered to zero connections"
+                            dispatch_attempts = dispatch_result.attempted_count,
+                            enqueued_count = dispatch_result.enqueued_count,
+                            dispatch_mode = delivery_mode.as_str(),
+                            delivery_scope = if matches!(delivery_mode, DeliveryMode::RequestResponse) {
+                                "connection"
+                            } else {
+                                "subjects"
+                            },
+                            request_id = request_id.as_deref().unwrap_or(""),
+                            route_found,
+                            routed_connection_id = routed_connection_id.as_deref().unwrap_or(""),
+                            buffer_if_undelivered,
+                            "outbox enqueued to zero connections"
                         );
                     }
                 }

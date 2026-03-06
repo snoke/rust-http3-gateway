@@ -22,6 +22,14 @@ pub async fn handle_client_message(
 
     let data = serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({"type":"raw","payload":raw}));
     let msg_type = data.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if let Some(request_id) = data
+        .get("request_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        state.bind_request_route(request_id, connection_id, info.user_id.as_str());
+    }
     if matches!(
         msg_type,
         "group_create"

@@ -187,9 +187,16 @@ impl WebTransportServer {
                         match outbound {
                             Some(OutboundMessage::Text(text)) => {
                                 if let Err(err) = send_unicast(connection.clone(), &Value::String(text.clone())).await {
-                                    warn!("outbound send failed for connection {connection_id}: {err}");
-                                    // Preserve messages that were dequeued for this connection but not delivered.
-                                    state.requeue_for_subjects(&info.subjects, text);
+                                    let outbound_meta = classify_outbound_event(&text);
+                                    warn!(
+                                        "outbound send failed for connection {connection_id}: {err}; dispatch_mode={} request_id={} event_type={}",
+                                        outbound_meta.mode.as_str(),
+                                        outbound_meta.request_id.as_deref().unwrap_or(""),
+                                        outbound_meta.event_type.as_deref().unwrap_or(""),
+                                    );
+                                    if matches!(outbound_meta.mode, OutboundDeliveryMode::Push) {
+                                        state.requeue_for_subjects(&info.subjects, text);
+                                    }
                                     break;
                                 }
                             }
@@ -297,6 +304,78 @@ fn query_param(path: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[derive(Clone, Copy, Debug)]
+enum OutboundDeliveryMode {
+    RequestResponse,
+    Push,
+}
+
+impl OutboundDeliveryMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RequestResponse => "request_response",
+            Self::Push => "push",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct OutboundEventMeta {
+    mode: OutboundDeliveryMode,
+    request_id: Option<String>,
+    event_type: Option<String>,
+}
+
+fn classify_outbound_event(raw_text: &str) -> OutboundEventMeta {
+    let parsed: Value = match serde_json::from_str(raw_text) {
+        Ok(value) => value,
+        Err(_) => {
+            return OutboundEventMeta {
+                mode: OutboundDeliveryMode::Push,
+                request_id: None,
+                event_type: None,
+            };
+        }
+    };
+
+    let payload = match parsed.get("payload") {
+        Some(value) => value,
+        None => {
+            return OutboundEventMeta {
+                mode: OutboundDeliveryMode::Push,
+                request_id: None,
+                event_type: None,
+            };
+        }
+    };
+
+    let request_id = payload
+        .get("request_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+
+    let event_type = payload
+        .get("type")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+
+    let mode = if request_id.is_some() {
+        OutboundDeliveryMode::RequestResponse
+    } else {
+        OutboundDeliveryMode::Push
+    };
+
+    OutboundEventMeta {
+        mode,
+        request_id,
+        event_type,
+    }
 }
 
 async fn read_auth_message(connection: Arc<wtransport::Connection>) -> Result<Value> {
