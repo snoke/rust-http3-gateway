@@ -161,6 +161,95 @@ pub async fn resolve_initial_auth(
                 success_payload: Some(payload),
             })
         }
+        "auth_identity_request" => {
+            let email = auth_payload
+                .get("email")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            let key_id = auth_payload
+                .get("key_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            let algorithm = auth_payload
+                .get("algorithm")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            let public_key = auth_payload
+                .get("public_key")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            let challenge = auth_payload
+                .get("challenge")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            let signature = auth_payload
+                .get("signature")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+
+            if email.is_empty()
+                || key_id.is_empty()
+                || algorithm.is_empty()
+                || public_key.is_empty()
+                || challenge.is_empty()
+                || signature.is_empty()
+            {
+                return Err(PreAuthFailure {
+                    code: "invalid_auth_payload".to_string(),
+                    message: "Identity auth payload is incomplete.".to_string(),
+                    request_id,
+                });
+            }
+
+            let (token, user_payload) = authenticate_via_http(
+                config,
+                "/api/identity/login",
+                json!({
+                    "email": email,
+                    "key_id": key_id,
+                    "algorithm": algorithm,
+                    "public_key": public_key,
+                    "challenge": challenge,
+                    "signature": signature,
+                }),
+                request_id.clone(),
+            )
+            .await?;
+
+            let mut payload = json!({
+                "type": "auth_identity_ok",
+                "token": token,
+                "ts": chrono::Utc::now().timestamp(),
+            });
+            if let Some(id) = request_id.clone() {
+                payload["request_id"] = Value::String(id);
+            }
+            if !user_payload.is_null() {
+                payload["user"] = user_payload;
+            }
+
+            Ok(PreAuthSuccess {
+                token: payload
+                    .get("token")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                client_instance_id,
+                success_payload: Some(payload),
+            })
+        }
         _ => Err(PreAuthFailure {
             code: "invalid_auth_type".to_string(),
             message: "Unsupported auth payload type.".to_string(),
