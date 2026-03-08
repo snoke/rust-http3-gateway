@@ -5,7 +5,8 @@ use crate::config::Config;
 
 #[derive(Debug)]
 pub struct PreAuthSuccess {
-    pub token: String,
+    pub token: Option<String>,
+    pub user_id: Option<String>,
     pub client_instance_id: String,
     pub success_payload: Option<Value>,
 }
@@ -50,7 +51,8 @@ pub async fn resolve_initial_auth(
                 .to_string();
 
             Ok(PreAuthSuccess {
-                token,
+                token: Some(token),
+                user_id: None,
                 client_instance_id,
                 success_payload: None,
             })
@@ -91,11 +93,12 @@ pub async fn resolve_initial_auth(
             }
 
             Ok(PreAuthSuccess {
-                token: payload
+                token: Some(payload
                     .get("token")
                     .and_then(Value::as_str)
                     .unwrap_or("")
-                    .to_string(),
+                    .to_string()),
+                user_id: None,
                 client_instance_id,
                 success_payload: Some(payload),
             })
@@ -152,11 +155,12 @@ pub async fn resolve_initial_auth(
             }
 
             Ok(PreAuthSuccess {
-                token: payload
+                token: Some(payload
                     .get("token")
                     .and_then(Value::as_str)
                     .unwrap_or("")
-                    .to_string(),
+                    .to_string()),
+                user_id: None,
                 client_instance_id,
                 success_payload: Some(payload),
             })
@@ -241,11 +245,49 @@ pub async fn resolve_initial_auth(
             }
 
             Ok(PreAuthSuccess {
-                token: payload
+                token: Some(payload
                     .get("token")
                     .and_then(Value::as_str)
                     .unwrap_or("")
-                    .to_string(),
+                    .to_string()),
+                user_id: None,
+                client_instance_id,
+                success_payload: Some(payload),
+            })
+        }
+        "dropbox_public_auth" => {
+            let slug = auth_payload
+                .get("slug")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            if !is_valid_dropbox_slug(&slug) {
+                return Err(PreAuthFailure {
+                    code: "invalid_dropbox_slug".to_string(),
+                    message: "Invalid dropbox slug.".to_string(),
+                    request_id,
+                });
+            }
+
+            let guest_connection_id = format!(
+                "public-dropbox:{}:{}",
+                slug,
+                chrono::Utc::now().timestamp_micros()
+            );
+
+            let mut payload = json!({
+                "type": "dropbox_public_auth_ok",
+                "slug": slug,
+                "ts": chrono::Utc::now().timestamp(),
+            });
+            if let Some(id) = request_id.clone() {
+                payload["request_id"] = Value::String(id);
+            }
+
+            Ok(PreAuthSuccess {
+                token: None,
+                user_id: Some(guest_connection_id),
                 client_instance_id,
                 success_payload: Some(payload),
             })
@@ -256,6 +298,15 @@ pub async fn resolve_initial_auth(
             request_id,
         }),
     }
+}
+
+fn is_valid_dropbox_slug(slug: &str) -> bool {
+    if slug.is_empty() || slug.len() > 64 {
+        return false;
+    }
+
+    slug.chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
 }
 
 async fn authenticate_via_http(

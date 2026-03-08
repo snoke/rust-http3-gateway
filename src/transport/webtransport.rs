@@ -107,10 +107,11 @@ impl WebTransportServer {
 
             let connection = Arc::new(session_request.accept().await?);
             let mut bootstrap_success_payload: Option<Value> = None;
+            let mut preauth_user_id: Option<String> = None;
 
             let (token, mut client_instance_id) = if let Some(raw_token) = query_param(&path, "token") {
                 (
-                    normalize_bearer_token(&raw_token).to_string(),
+                    Some(normalize_bearer_token(&raw_token).to_string()),
                     query_param(&path, "client_instance_id").unwrap_or_default(),
                 )
             } else {
@@ -122,6 +123,7 @@ impl WebTransportServer {
                         return Err(anyhow!("auth rejected: {}", failure.code));
                     }
                 };
+                preauth_user_id = resolved.user_id;
                 bootstrap_success_payload = resolved.success_payload;
                 (resolved.token, resolved.client_instance_id)
             };
@@ -135,12 +137,17 @@ impl WebTransportServer {
                 client_instance_id.clear();
             }
 
-            let claims = verify_jwt(&config, &token).await.map_err(|_| AuthError::InvalidToken)?;
-            let user_id = claims
-                .get(&config.jwt_user_id_claim)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let user_id = if let Some(user_id) = preauth_user_id {
+                user_id
+            } else {
+                let token = token.ok_or_else(|| anyhow!("missing_auth_token"))?;
+                let claims = verify_jwt(&config, &token).await.map_err(|_| AuthError::InvalidToken)?;
+                claims
+                    .get(&config.jwt_user_id_claim)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
             if user_id.is_empty() {
                 return Err(AuthError::InvalidToken.into());
             }
