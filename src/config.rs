@@ -12,6 +12,8 @@ pub struct Config {
     pub jwt_audience: String,
     pub jwt_leeway: i64,
     pub gateway_api_key: String,
+    pub auth_backend_base_url: String,
+    pub auth_request_timeout_ms: u64,
     pub redis_dsn: String,
     pub redis_stream: String,
     pub redis_inbox_stream: String,
@@ -44,6 +46,8 @@ impl Config {
         let jwt_leeway = env_i64("JWT_LEEWAY", 0);
 
         let gateway_api_key = env_str("GATEWAY_API_KEY", "");
+        let auth_backend_base_url = env_str("AUTH_BACKEND_BASE_URL", "http://symfony:8000");
+        let auth_request_timeout_ms = env_u64("AUTH_REQUEST_TIMEOUT_MS", 8000).max(1000);
         let redis_dsn = env_str("REDIS_DSN", "");
         let redis_stream = env_str("REDIS_STREAM", "ws.outbox");
         let redis_inbox_stream = env_str("REDIS_INBOX_STREAM", "ws.inbox");
@@ -72,6 +76,8 @@ impl Config {
             jwt_audience,
             jwt_leeway,
             gateway_api_key,
+            auth_backend_base_url,
+            auth_request_timeout_ms,
             redis_dsn,
             redis_stream,
             redis_inbox_stream,

@@ -9,6 +9,7 @@ mod config;
 mod gateway_core;
 mod http_api;
 mod message;
+mod preauth;
 mod state;
 mod transport;
 

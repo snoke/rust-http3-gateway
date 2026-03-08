@@ -15,6 +15,7 @@ use crate::auth::{verify_jwt, AuthError};
 use crate::broker::publish_event;
 use crate::config::Config;
 use crate::gateway_core::handle_client_message;
+use crate::preauth::{resolve_initial_auth, PreAuthFailure};
 use crate::state::{GatewayState, OutboundMessage};
 
 use super::TransportAdapter;
@@ -110,6 +111,7 @@ async fn handle_socket_impl(
     app: WsAppState,
     query: WsAuthQuery,
 ) -> Result<()> {
+    let mut bootstrap_success_payload: Option<Value> = None;
     let (token, mut client_instance_id) = if let Some(raw_token) = query.token.as_deref() {
         (
             normalize_bearer_token(raw_token).to_string(),
@@ -117,20 +119,15 @@ async fn handle_socket_impl(
         )
     } else {
         let auth_payload = read_auth_message(&mut socket).await?;
-        if auth_payload.get("type").and_then(|v| v.as_str()) != Some("auth") {
-            return Err(AuthError::InvalidToken.into());
-        }
-        let token = auth_payload
-            .get("token")
-            .and_then(|v| v.as_str())
-            .ok_or(AuthError::MissingToken)?
-            .to_string();
-        let client_instance_id = auth_payload
-            .get("client_instance_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        (token, client_instance_id)
+        let resolved = match resolve_initial_auth(&app.config, &auth_payload).await {
+            Ok(result) => result,
+            Err(failure) => {
+                let _ = send_auth_error(&mut socket, &failure).await;
+                return Err(anyhow!("auth rejected: {}", failure.code));
+            }
+        };
+        bootstrap_success_payload = resolved.success_payload;
+        (resolved.token, resolved.client_instance_id)
     };
 
     client_instance_id = client_instance_id.trim().to_string();
@@ -160,6 +157,10 @@ async fn handle_socket_impl(
         subjects,
         connected_at,
     );
+
+    if let Some(payload) = bootstrap_success_payload {
+        socket.send(WsMessage::Text(payload.to_string())).await?;
+    }
 
     socket
         .send(WsMessage::Text(
@@ -248,6 +249,20 @@ async fn read_auth_message(socket: &mut WebSocket) -> Result<Value> {
     }
 }
 
+async fn send_auth_error(socket: &mut WebSocket, failure: &PreAuthFailure) -> Result<()> {
+    let mut payload = json!({
+        "type": "auth_error",
+        "error": failure.code,
+        "message": failure.message,
+        "ts": chrono::Utc::now().timestamp(),
+    });
+    if let Some(request_id) = failure.request_id.clone() {
+        payload["request_id"] = Value::String(request_id);
+    }
+    socket.send(WsMessage::Text(payload.to_string())).await?;
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl TransportAdapter for WebSocketServer {
     fn name(&self) -> &'static str {
@@ -262,4 +277,3 @@ impl TransportAdapter for WebSocketServer {
         WebSocketServer::serve(self).await
     }
 }
-

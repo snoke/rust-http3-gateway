@@ -16,6 +16,7 @@ use crate::auth::{verify_jwt, AuthError};
 use crate::broker::publish_event;
 use crate::config::Config;
 use crate::gateway_core::handle_client_message;
+use crate::preauth::{resolve_initial_auth, PreAuthFailure};
 use crate::state::{GatewayState, OutboundMessage};
 
 use super::TransportAdapter;
@@ -105,6 +106,7 @@ impl WebTransportServer {
             );
 
             let connection = Arc::new(session_request.accept().await?);
+            let mut bootstrap_success_payload: Option<Value> = None;
 
             let (token, mut client_instance_id) = if let Some(raw_token) = query_param(&path, "token") {
                 (
@@ -113,20 +115,15 @@ impl WebTransportServer {
                 )
             } else {
                 let auth_payload = read_auth_message(connection.clone()).await?;
-                if auth_payload.get("type").and_then(|v| v.as_str()) != Some("auth") {
-                    return Err(AuthError::InvalidToken.into());
-                }
-                let token = auth_payload
-                    .get("token")
-                    .and_then(|v| v.as_str())
-                    .ok_or(AuthError::MissingToken)?
-                    .to_string();
-                let client_instance_id = auth_payload
-                    .get("client_instance_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                (token, client_instance_id)
+                let resolved = match resolve_initial_auth(&config, &auth_payload).await {
+                    Ok(result) => result,
+                    Err(failure) => {
+                        let _ = send_auth_error(connection.clone(), &failure).await;
+                        return Err(anyhow!("auth rejected: {}", failure.code));
+                    }
+                };
+                bootstrap_success_payload = resolved.success_payload;
+                (resolved.token, resolved.client_instance_id)
             };
 
             client_instance_id = client_instance_id.trim().to_string();
@@ -166,6 +163,9 @@ impl WebTransportServer {
                 );
             }
 
+            if let Some(payload) = bootstrap_success_payload {
+                send_unicast(connection.clone(), &payload).await?;
+            }
             send_unicast(connection.clone(), &json!({"type":"auth_ok","user_id":user_id})).await?;
 
             if let Some(redis) = redis.as_ref() {
@@ -376,6 +376,22 @@ fn classify_outbound_event(raw_text: &str) -> OutboundEventMeta {
         request_id,
         event_type,
     }
+}
+
+async fn send_auth_error(
+    connection: Arc<wtransport::Connection>,
+    failure: &PreAuthFailure,
+) -> Result<()> {
+    let mut payload = json!({
+        "type": "auth_error",
+        "error": failure.code,
+        "message": failure.message,
+        "ts": chrono::Utc::now().timestamp(),
+    });
+    if let Some(request_id) = failure.request_id.clone() {
+        payload["request_id"] = Value::String(request_id);
+    }
+    send_unicast(connection, &payload).await
 }
 
 async fn read_auth_message(connection: Arc<wtransport::Connection>) -> Result<Value> {
