@@ -124,6 +124,10 @@ pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: r
 
                 let payload = decoded.get("payload").cloned().unwrap_or(Value::Null);
                 let request_id = extract_request_id(&payload);
+                let payload_type = payload
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
                 let delivery_mode = if request_id.is_some() {
                     DeliveryMode::RequestResponse
                 } else {
@@ -184,6 +188,7 @@ pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: r
                         dispatch_attempts = dispatch_result.attempted_count,
                         enqueued_count = dispatch_result.enqueued_count,
                         dispatch_mode = delivery_mode.as_str(),
+                        payload_type,
                         delivery_scope = if matches!(delivery_mode, DeliveryMode::RequestResponse) {
                             "connection"
                         } else {
@@ -203,6 +208,7 @@ pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: r
                             dispatch_attempts = dispatch_result.attempted_count,
                             enqueued_count = dispatch_result.enqueued_count,
                             dispatch_mode = delivery_mode.as_str(),
+                            payload_type,
                             delivery_scope = if matches!(delivery_mode, DeliveryMode::RequestResponse) {
                                 "connection"
                             } else {
