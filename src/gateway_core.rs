@@ -5,6 +5,7 @@ use uuid::Uuid;
 use crate::broker::publish_event;
 use crate::config::Config;
 use crate::message::{extract_channel_id, extract_flags, extract_payload, InternalMessage};
+use crate::routes::resolve_dispatch_plan;
 use crate::state::{ConnectionInfo, GatewayState};
 
 pub async fn handle_client_message(
@@ -22,6 +23,8 @@ pub async fn handle_client_message(
 
     let data = serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({"type":"raw","payload":raw}));
     let msg_type = data.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let dispatch_plan = resolve_dispatch_plan(msg_type);
+    let dispatch_steps: Vec<&str> = dispatch_plan.iter().map(|step| step.as_str()).collect();
     if let Some(request_id) = data
         .get("request_id")
         .and_then(|value| value.as_str())
@@ -54,6 +57,7 @@ pub async fn handle_client_message(
             msg_type = %msg_type,
             conversation_id,
             session_epoch,
+            dispatch_plan = %dispatch_steps.join("->"),
             "ingress message"
         );
     }
@@ -87,6 +91,7 @@ pub async fn handle_client_message(
         "connected_at": info.connected_at,
         "message": data,
         "raw": raw,
+        "dispatch_plan": dispatch_steps,
     });
 
     if let Some(redis) = redis {

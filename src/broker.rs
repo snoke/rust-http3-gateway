@@ -143,7 +143,6 @@ pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: r
                 if let Ok(text) = serde_json::to_string(&envelope) {
                     let mut route_found = false;
                     let mut routed_connection_id: Option<String> = None;
-                    let mut fallback_subject_dispatch = false;
                     let dispatch_result = match delivery_mode {
                         DeliveryMode::RequestResponse => {
                             let mut result = DispatchResult {
@@ -161,20 +160,6 @@ pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: r
                                         state.clear_request_route(req_id);
                                     }
                                 }
-                            }
-
-                            // Route bindings can go stale during reconnect/HMR.
-                            // Fallback to subject fanout so request-correlated responses
-                            // still reach at least one active client connection.
-                            if result.enqueued_count == 0 {
-                                fallback_subject_dispatch = true;
-                                let fallback = state.send_to_subjects(&subjects, text.clone(), false, None);
-                                result.attempted_count = result
-                                    .attempted_count
-                                    .saturating_add(fallback.attempted_count);
-                                result.enqueued_count = result
-                                    .enqueued_count
-                                    .saturating_add(fallback.enqueued_count);
                             }
                             result
                         }
@@ -197,7 +182,6 @@ pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: r
                         request_id = request_id.as_deref().unwrap_or(""),
                         route_found,
                         routed_connection_id = routed_connection_id.as_deref().unwrap_or(""),
-                        fallback_subject_dispatch,
                         buffer_if_undelivered,
                         "outbox dispatch"
                     );
@@ -217,7 +201,6 @@ pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: r
                             request_id = request_id.as_deref().unwrap_or(""),
                             route_found,
                             routed_connection_id = routed_connection_id.as_deref().unwrap_or(""),
-                            fallback_subject_dispatch,
                             buffer_if_undelivered,
                             "outbox enqueued to zero connections"
                         );
