@@ -34,11 +34,9 @@ pub async fn handle_client_message(
         msg_type,
         "group_create"
             | "group_add"
-            | "sender_keys_commit"
-            | "sender_keys_welcome_request"
-            | "sender_keys_welcome_ack"
             | "chat"
-            | "prekey_bundle_request"
+            | "mls_commit"
+            | "mls_welcome_request"
             | "messages_request"
             | "conversations_request"
     ) {
@@ -97,4 +95,3 @@ pub async fn handle_client_message(
         }
     }
 }
-

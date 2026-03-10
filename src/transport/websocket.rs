@@ -6,12 +6,11 @@ use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use std::time::Duration;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::auth::{verify_jwt, AuthError};
+use crate::auth::verify_jwt;
 use crate::broker::publish_event;
 use crate::config::Config;
 use crate::gateway_core::handle_client_message;
@@ -31,6 +30,12 @@ struct WsAppState {
 struct WsAuthQuery {
     token: Option<String>,
     client_instance_id: Option<String>,
+}
+
+struct WsAuthContext {
+    user_id: String,
+    client_instance_id: String,
+    bootstrap_success_payload: Option<Value>,
 }
 
 pub struct WebSocketServer {
@@ -111,61 +116,20 @@ async fn handle_socket_impl(
     app: WsAppState,
     query: WsAuthQuery,
 ) -> Result<()> {
-    let mut bootstrap_success_payload: Option<Value> = None;
-    let mut preauth_user_id: Option<String> = None;
-    let (token, mut client_instance_id) = if let Some(raw_token) = query.token.as_deref() {
-        (
-            Some(normalize_bearer_token(raw_token).to_string()),
-            query.client_instance_id.unwrap_or_default(),
-        )
-    } else {
-        let auth_payload = read_auth_message(&mut socket).await?;
-        let resolved = match resolve_initial_auth(&app.config, &auth_payload).await {
-            Ok(result) => result,
-            Err(failure) => {
-                let _ = send_auth_error(&mut socket, &failure).await;
-                return Err(anyhow!("auth rejected: {}", failure.code));
-            }
-        };
-        preauth_user_id = resolved.user_id;
-        bootstrap_success_payload = resolved.success_payload;
-        (resolved.token, resolved.client_instance_id)
-    };
-
-    client_instance_id = client_instance_id.trim().to_string();
-    if client_instance_id.len() > 128
-        || !client_instance_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-    {
-        client_instance_id.clear();
-    }
-    let user_id = if let Some(user_id) = preauth_user_id {
-        user_id
-    } else {
-        let token = token.ok_or_else(|| anyhow!("missing_auth_token"))?;
-        let claims = verify_jwt(&app.config, &token).await.map_err(|_| AuthError::InvalidToken)?;
-        claims
-            .get(&app.config.jwt_user_id_claim)
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
-    if user_id.is_empty() {
-        return Err(AuthError::InvalidToken.into());
-    }
+    let auth_context = authenticate_socket(&mut socket, &app, &query).await?;
+    let user_id = auth_context.user_id;
 
     let connected_at = chrono::Utc::now().timestamp();
     let subjects = vec![format!("user:{user_id}")];
     let (info, mut outbound_rx, _evicted) = app.state.register_connection(
         connection_id.to_string(),
         user_id.clone(),
-        client_instance_id,
+        auth_context.client_instance_id,
         subjects,
         connected_at,
     );
 
-    if let Some(payload) = bootstrap_success_payload {
+    if let Some(payload) = auth_context.bootstrap_success_payload {
         socket.send(WsMessage::Text(payload.to_string())).await?;
     }
 
@@ -236,24 +200,135 @@ async fn handle_socket_impl(
     Ok(())
 }
 
+async fn authenticate_socket(
+    socket: &mut WebSocket,
+    app: &WsAppState,
+    query: &WsAuthQuery,
+) -> Result<WsAuthContext> {
+    let mut pending_payload = query.token.as_deref().map(|raw_token| {
+        json!({
+            "type": "auth",
+            "token": normalize_bearer_token(raw_token),
+            "client_instance_id": query.client_instance_id.clone().unwrap_or_default(),
+        })
+    });
+
+    loop {
+        let auth_payload = if let Some(payload) = pending_payload.take() {
+            payload
+        } else {
+            read_auth_message(socket).await?
+        };
+        let request_id = normalize_request_id(
+            auth_payload
+                .get("request_id")
+                .and_then(Value::as_str),
+        );
+        let resolved = match resolve_initial_auth(&app.config, &auth_payload).await {
+            Ok(result) => result,
+            Err(failure) => {
+                let _ = send_auth_error(socket, &failure).await;
+                continue;
+            }
+        };
+
+        let mut client_instance_id = resolved.client_instance_id.trim().to_string();
+        if client_instance_id.len() > 128
+            || !client_instance_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        {
+            client_instance_id.clear();
+        }
+
+        let user_id = if let Some(user_id) = resolved.user_id {
+            user_id
+        } else {
+            let token = match resolved.token {
+                Some(value) if !value.trim().is_empty() => value,
+                _ => {
+                    let _ = send_auth_error(
+                        socket,
+                        &PreAuthFailure {
+                            code: "missing_token".to_string(),
+                            message: "Missing token.".to_string(),
+                            request_id: request_id.clone(),
+                        },
+                    )
+                    .await;
+                    continue;
+                }
+            };
+            let claims = match verify_jwt(&app.config, &token).await {
+                Ok(claims) => claims,
+                Err(_) => {
+                    let _ = send_auth_error(
+                        socket,
+                        &PreAuthFailure {
+                            code: "invalid_token".to_string(),
+                            message: "Invalid token.".to_string(),
+                            request_id: request_id.clone(),
+                        },
+                    )
+                    .await;
+                    continue;
+                }
+            };
+            claims
+                .get(&app.config.jwt_user_id_claim)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        if user_id.is_empty() {
+            let _ = send_auth_error(
+                socket,
+                &PreAuthFailure {
+                    code: "invalid_token".to_string(),
+                    message: "Invalid token.".to_string(),
+                    request_id,
+                },
+            )
+            .await;
+            continue;
+        }
+
+        return Ok(WsAuthContext {
+            user_id,
+            client_instance_id,
+            bootstrap_success_payload: resolved.success_payload,
+        });
+    }
+}
+
 fn normalize_bearer_token(token: &str) -> &str {
     token.trim().strip_prefix("Bearer ").unwrap_or(token).trim()
 }
 
 async fn read_auth_message(socket: &mut WebSocket) -> Result<Value> {
-    let auth_timeout = tokio::time::sleep(Duration::from_secs(5));
-    tokio::pin!(auth_timeout);
-
-    tokio::select! {
-        _ = &mut auth_timeout => Err(anyhow!("auth_timeout")),
-        frame = socket.recv() => {
-            match frame {
-                Some(Ok(WsMessage::Text(text))) => Ok(serde_json::from_str::<Value>(&text)?),
-                Some(Ok(WsMessage::Binary(bytes))) => Ok(serde_json::from_slice::<Value>(&bytes)?),
-                _ => Err(anyhow!("missing_auth_payload")),
+    loop {
+        match socket.recv().await {
+            Some(Ok(WsMessage::Text(text))) => return Ok(serde_json::from_str::<Value>(&text)?),
+            Some(Ok(WsMessage::Binary(bytes))) => {
+                return Ok(serde_json::from_slice::<Value>(&bytes)?);
             }
+            Some(Ok(WsMessage::Ping(payload))) => {
+                let _ = socket.send(WsMessage::Pong(payload)).await;
+            }
+            Some(Ok(WsMessage::Pong(_))) => {}
+            Some(Ok(WsMessage::Close(_))) | None => return Err(anyhow!("missing_auth_payload")),
+            Some(Ok(_)) => {}
+            Some(Err(err)) => return Err(anyhow!("auth_read_failed: {err}")),
         }
     }
+}
+
+fn normalize_request_id(value: Option<&str>) -> Option<String> {
+    let request_id = value?.trim();
+    if request_id.is_empty() {
+        return None;
+    }
+    Some(request_id.chars().take(128).collect::<String>())
 }
 
 async fn send_auth_error(socket: &mut WebSocket, failure: &PreAuthFailure) -> Result<()> {

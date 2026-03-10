@@ -122,6 +122,36 @@ pub async fn resolve_initial_auth(
                 .map(str::trim)
                 .unwrap_or("")
                 .to_string();
+            let key_id = auth_payload
+                .get("key_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            let algorithm = auth_payload
+                .get("algorithm")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            let public_key = auth_payload
+                .get("public_key")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            let challenge = auth_payload
+                .get("challenge")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            let signature = auth_payload
+                .get("signature")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
             if name.is_empty() || email.is_empty() || password.is_empty() {
                 return Err(PreAuthFailure {
                     code: "invalid_auth_payload".to_string(),
@@ -129,15 +159,42 @@ pub async fn resolve_initial_auth(
                     request_id,
                 });
             }
+            let identity_requested = !key_id.is_empty()
+                || !algorithm.is_empty()
+                || !public_key.is_empty()
+                || !challenge.is_empty()
+                || !signature.is_empty();
+            if identity_requested
+                && (key_id.is_empty()
+                    || algorithm.is_empty()
+                    || public_key.is_empty()
+                    || challenge.is_empty()
+                    || signature.is_empty())
+            {
+                return Err(PreAuthFailure {
+                    code: "invalid_auth_payload".to_string(),
+                    message: "Identity registration payload is incomplete.".to_string(),
+                    request_id,
+                });
+            }
+
+            let mut register_payload = json!({
+                "name": name,
+                "email": email,
+                "password": password,
+            });
+            if identity_requested {
+                register_payload["key_id"] = Value::String(key_id);
+                register_payload["algorithm"] = Value::String(algorithm);
+                register_payload["public_key"] = Value::String(public_key);
+                register_payload["challenge"] = Value::String(challenge);
+                register_payload["signature"] = Value::String(signature);
+            }
 
             let (token, user_payload) = authenticate_via_http(
                 config,
                 "/api/register",
-                json!({
-                    "name": name,
-                    "email": email,
-                    "password": password,
-                }),
+                register_payload,
                 request_id.clone(),
             )
             .await?;
