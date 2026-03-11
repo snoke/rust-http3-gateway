@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::config::Config;
+use crate::routes::{resolve_command_spec, RoutingClass};
 
 #[derive(Debug)]
 pub struct PreAuthSuccess {
@@ -35,6 +36,19 @@ pub async fn resolve_initial_auth(
         .unwrap_or("")
         .trim()
         .to_string();
+
+    let command_spec = resolve_command_spec(auth_type.as_str()).ok_or_else(|| PreAuthFailure {
+        code: "invalid_auth_type".to_string(),
+        message: "Unsupported auth payload type.".to_string(),
+        request_id: request_id.clone(),
+    })?;
+    if !matches!(command_spec.routing_class, RoutingClass::PreAuth) {
+        return Err(PreAuthFailure {
+            code: "invalid_auth_type".to_string(),
+            message: "Unsupported auth payload type.".to_string(),
+            request_id: request_id.clone(),
+        });
+    }
 
     match auth_type.as_str() {
         "auth" => {
@@ -462,4 +476,50 @@ fn extract_error_code(value: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|item| !item.is_empty())
         .map(|item| item.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> Config {
+        Config {
+            transport: "websocket".to_string(),
+            jwt_alg: "RS256".to_string(),
+            jwt_user_id_claim: "user_id".to_string(),
+            jwt_public_key: String::new(),
+            jwt_public_key_file: String::new(),
+            jwt_jwks_url: String::new(),
+            jwt_issuer: String::new(),
+            jwt_audience: String::new(),
+            jwt_leeway: 0,
+            gateway_api_key: String::new(),
+            auth_backend_base_url: "http://localhost".to_string(),
+            auth_request_timeout_ms: 1000,
+            redis_dsn: String::new(),
+            redis_stream: "ws.outbox".to_string(),
+            redis_inbox_stream: "ws.inbox".to_string(),
+            redis_events_stream: "ws.events".to_string(),
+            max_connections_per_user: None,
+            stale_connection_timeout_seconds: 0,
+            stale_prune_interval_seconds: 1,
+            webtransport_port: 4433,
+            websocket_port: 8081,
+            http_api_port: 8080,
+            cert_pemfile: String::new(),
+            key_pemfile: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_non_preauth_commands() {
+        let config = test_config();
+        let payload = json!({
+            "type": "chat_message_send",
+            "request_id": "req-1"
+        });
+        let result = resolve_initial_auth(&config, &payload).await;
+        let error = result.expect_err("chat command must be rejected in preauth stage");
+        assert_eq!(error.code, "invalid_auth_type");
+    }
 }

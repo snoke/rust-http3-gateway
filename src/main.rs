@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde_json::json;
 use std::time::Duration;
 use tracing::{error, info};
@@ -19,6 +19,11 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+
+    if let Err(err) = routes::validate_command_registry() {
+        error!("invalid command registry: {err}");
+        return Err(anyhow!("invalid command registry: {err}"));
+    }
 
     let config = config::Config::from_env();
     let state = state::GatewayState::new(config.max_connections_per_user);

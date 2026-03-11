@@ -120,7 +120,11 @@ async fn handle_socket_impl(
     let user_id = auth_context.user_id;
 
     let connected_at = chrono::Utc::now().timestamp();
-    let subjects = vec![format!("user:{user_id}")];
+    let mut subjects = vec![format!("user:{user_id}")];
+    let normalized_user = user_id.trim().to_lowercase();
+    if !normalized_user.is_empty() && normalized_user != user_id {
+        subjects.push(format!("user:{normalized_user}"));
+    }
     let (info, mut outbound_rx, _evicted) = app.state.register_connection(
         connection_id.to_string(),
         user_id.clone(),
