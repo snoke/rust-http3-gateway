@@ -19,7 +19,7 @@ pub type DispatchPlan = &'static [DispatchStep];
 
 const SYMFONY_ONLY: DispatchPlan = &[DispatchStep::Symfony];
 const SUBJECTS_ONLY: DispatchPlan = &[DispatchStep::Subjects];
-const FASTPATH: DispatchPlan = &[DispatchStep::Subjects, DispatchStep::Symfony];
+const FASTPATH_ROUTE: DispatchPlan = &[DispatchStep::Subjects, DispatchStep::Symfony];
 const SYMFONY_THEN_SUBJECTS: DispatchPlan = &[DispatchStep::Symfony, DispatchStep::Subjects];
 
 pub const COMMAND_ROUTE_TABLE: &[(&str, DispatchPlan)] = &[
@@ -92,7 +92,7 @@ pub const COMMAND_ROUTE_TABLE: &[(&str, DispatchPlan)] = &[
     ("call_session_mute", SYMFONY_ONLY),
     ("call_session_camera", SYMFONY_ONLY),
     ("call_session_token_request", SYMFONY_ONLY),
-    ("chat", FASTPATH),
+    ("chat", FASTPATH_ROUTE),
 ];
 
 pub fn resolve_dispatch_plan(command_type: &str) -> DispatchPlan {
@@ -114,8 +114,8 @@ pub fn subjects_only() -> DispatchPlan {
     SUBJECTS_ONLY
 }
 
-pub fn FASTPATH() -> DispatchPlan {
-    FASTPATH
+pub fn fastpath() -> DispatchPlan {
+    FASTPATH_ROUTE
 }
 
 pub fn symfony_then_subjects() -> DispatchPlan {
