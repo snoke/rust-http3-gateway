@@ -347,6 +347,7 @@ pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: r
                                 attempted_count: 0,
                                 enqueued_count: 0,
                             };
+                            let mut delivered_via_route = false;
                             if let Some(req_id) = request_id.as_deref() {
                                 if let Some(connection_id) = state.resolve_request_route(req_id, &subjects) {
                                     route_found = true;
@@ -354,10 +355,18 @@ pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: r
                                     routed_connection_id = Some(connection_id.clone());
                                     if state.send_to_connection(connection_id.as_str(), text.clone()) {
                                         result.enqueued_count = 1;
+                                        delivered_via_route = true;
                                     } else {
                                         state.clear_request_route(req_id);
                                     }
                                 }
+                            }
+                            if !delivered_via_route {
+                                // Fallback: deliver to subjects when request-route mapping is missing/stale.
+                                // This avoids client timeouts after reconnects when response still carries a request_id.
+                                let fallback = state.send_to_subjects(&subjects, text.clone(), false, None);
+                                result.attempted_count += fallback.attempted_count;
+                                result.enqueued_count += fallback.enqueued_count;
                             }
                             result
                         }
