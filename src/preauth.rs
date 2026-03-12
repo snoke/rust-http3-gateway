@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::config::Config;
+use crate::project::preauth_config;
 use crate::routes::{resolve_command_spec, RoutingClass};
 
 #[derive(Debug)]
@@ -42,7 +43,7 @@ pub async fn resolve_initial_auth(
         message: "Unsupported auth payload type.".to_string(),
         request_id: request_id.clone(),
     })?;
-    if !matches!(command_spec.routing_class, RoutingClass::PreAuth) {
+    if !matches!(command_spec.routing_class, RoutingClass::NoAuth) {
         return Err(PreAuthFailure {
             code: "invalid_auth_type".to_string(),
             message: "Unsupported auth payload type.".to_string(),
@@ -92,8 +93,13 @@ pub async fn resolve_initial_auth(
                 });
             }
 
-            let (token, user_payload) =
-                authenticate_via_http(config, "/api/login_check", json!({ "email": email, "password": password }), request_id.clone()).await?;
+            let (token, user_payload) = authenticate_via_http(
+                config,
+                resolve_preauth_http_path(auth_type.as_str(), request_id.clone())?,
+                json!({ "email": email, "password": password }),
+                request_id.clone(),
+            )
+            .await?;
             let mut payload = json!({
                 "type": "auth_login_ok",
                 "token": token,
@@ -207,7 +213,7 @@ pub async fn resolve_initial_auth(
 
             let (token, user_payload) = authenticate_via_http(
                 config,
-                "/api/register",
+                resolve_preauth_http_path(auth_type.as_str(), request_id.clone())?,
                 register_payload,
                 request_id.clone(),
             )
@@ -290,7 +296,7 @@ pub async fn resolve_initial_auth(
 
             let (token, user_payload) = authenticate_via_http(
                 config,
-                "/api/identity/login",
+                resolve_preauth_http_path(auth_type.as_str(), request_id.clone())?,
                 json!({
                     "email": email,
                     "key_id": key_id,
@@ -341,10 +347,9 @@ pub async fn resolve_initial_auth(
                 });
             }
 
-            let guest_connection_id = format!(
-                "public-dropbox:{}:{}",
-                slug,
-                chrono::Utc::now().timestamp_micros()
+            let guest_connection_id = preauth_config::compose_dropbox_guest_user_id(
+                &slug,
+                chrono::Utc::now().timestamp_micros(),
             );
 
             let mut payload = json!({
@@ -457,6 +462,17 @@ fn normalize_request_id(value: Option<&str>) -> Option<String> {
         return None;
     }
     Some(request_id.chars().take(128).collect::<String>())
+}
+
+fn resolve_preauth_http_path(
+    command_name: &str,
+    request_id: Option<String>,
+) -> Result<&'static str, PreAuthFailure> {
+    preauth_config::resolve_http_path(command_name).ok_or_else(|| PreAuthFailure {
+        code: "auth_route_unconfigured".to_string(),
+        message: format!("No auth backend route configured for '{command_name}'."),
+        request_id,
+    })
 }
 
 fn extract_error_message(value: &Value) -> Option<String> {

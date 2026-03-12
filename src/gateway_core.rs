@@ -5,7 +5,9 @@ use uuid::Uuid;
 use crate::broker::publish_event;
 use crate::config::Config;
 use crate::message::{extract_channel_id, extract_flags, extract_payload, InternalMessage};
-use crate::routes::{resolve_command_spec, resolve_dispatch_plan, DispatchStep, RoutingClass};
+use crate::routes::{
+    resolve_command_spec, resolve_relay_authorization_spec, RoutingClass,
+};
 use crate::state::{ConnectionInfo, GatewayState};
 
 pub async fn handle_client_message(
@@ -54,18 +56,7 @@ pub async fn handle_client_message(
         }
     };
 
-    if command_spec.deprecated {
-        warn!(
-            user_id = %info.user_id,
-            connection_id = %connection_id,
-            msg_type = %msg_type,
-            owner = %command_spec.owner,
-            notes = %command_spec.notes.unwrap_or(""),
-            "deprecated command used"
-        );
-    }
-
-    if matches!(command_spec.routing_class, RoutingClass::PreAuth) {
+    if matches!(command_spec.routing_class, RoutingClass::NoAuth) {
         send_gateway_command_error(
             state,
             connection_id,
@@ -90,29 +81,24 @@ pub async fn handle_client_message(
         return;
     }
 
-    let dispatch_plan = match resolve_dispatch_plan(msg_type) {
-        Some(plan) => plan,
-        None => {
-            send_gateway_command_error(
-                state,
-                connection_id,
-                msg_type,
-                "invalid_dispatch_plan",
-                "Command has no dispatch plan.",
-            );
-            return;
-        }
+    let has_subjects_step = matches!(command_spec.routing_class, RoutingClass::RelayHotpath);
+    let has_symfony_step = matches!(command_spec.routing_class, RoutingClass::BackendControl)
+        || (has_subjects_step && command_spec.mirror_to_backend);
+    let runtime_path: Vec<&str> = match (has_subjects_step, has_symfony_step) {
+        (true, true) => vec!["subjects", "symfony"],
+        (true, false) => vec!["subjects"],
+        (false, true) => vec!["symfony"],
+        (false, false) => vec![],
     };
-    let dispatch_steps: Vec<&str> = dispatch_plan.iter().map(|step| step.as_str()).collect();
-    let has_symfony_step = dispatch_plan.iter().any(|step| matches!(step, DispatchStep::Symfony));
-    let has_subjects_step = dispatch_plan.iter().any(|step| matches!(step, DispatchStep::Subjects));
     if let Some(request_id) = data
         .get("request_id")
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        state.bind_request_route(request_id, connection_id, info.user_id.as_str());
+        if has_symfony_step {
+            state.bind_request_route(request_id, connection_id, info.user_id.as_str());
+        }
     }
     if matches!(
         msg_type,
@@ -140,14 +126,14 @@ pub async fn handle_client_message(
             semantic_type = %command_spec.message_type.as_str(),
             conversation_id,
             session_epoch,
-            dispatch_plan = %dispatch_steps.join("->"),
+            runtime_path = %runtime_path.join("->"),
             "ingress message"
         );
     }
 
     if has_subjects_step {
-        let target_subjects = collect_target_subjects(&data);
-        if target_subjects.is_empty() {
+        let relay_targets = collect_relay_targets(&data);
+        if relay_targets.subjects.is_empty() {
             warn!(
                 user_id = %info.user_id,
                 connection_id = %connection_id,
@@ -165,6 +151,75 @@ pub async fn handle_client_message(
                 return;
             }
         } else {
+            if matches!(command_spec.routing_class, RoutingClass::RelayHotpath) {
+                let Some(auth_spec) = resolve_relay_authorization_spec(msg_type) else {
+                    send_gateway_command_error(
+                        state,
+                        connection_id,
+                        msg_type,
+                        "relay_auth_spec_missing",
+                        "Relay command has no authorization metadata.",
+                    );
+                    return;
+                };
+                let replay_nonce = data
+                    .get("nonce")
+                    .and_then(Value::as_str)
+                    .or_else(|| data.get("header").and_then(Value::as_str));
+                let operation_key = data
+                    .get(auth_spec.operation_key_field)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or("");
+                if operation_key.is_empty() {
+                    send_gateway_command_error(
+                        state,
+                        connection_id,
+                        msg_type,
+                        "relay_operation_key_missing",
+                        "Relay command is missing operation key.",
+                    );
+                    return;
+                }
+                if auth_spec.requires_relay_context {
+                    let payload_size_hint = data
+                        .get("ciphertext")
+                        .and_then(Value::as_str)
+                        .map(|value| value.len());
+                    let now_ts = chrono::Utc::now().timestamp();
+                    match state.authorize_relay_hotpath(
+                        info.user_id.as_str(),
+                        msg_type,
+                        auth_spec,
+                        operation_key,
+                        &relay_targets.emails,
+                        replay_nonce,
+                        payload_size_hint,
+                        now_ts,
+                    ) {
+                        Ok(decision) => {
+                            info!(
+                                user_id = %info.user_id,
+                                connection_id = %connection_id,
+                                msg_type = %msg_type,
+                                relay_context_id = %decision.context_id,
+                                relay_policy_version = decision.policy_version,
+                                "relay authorization passed"
+                            );
+                        }
+                        Err(error) => {
+                            send_gateway_command_error(
+                                state,
+                                connection_id,
+                                msg_type,
+                                error.code(),
+                                "Relay authorization failed.",
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
             let mut relay_payload = data.clone();
             if relay_payload
                 .get("from")
@@ -180,13 +235,13 @@ pub async fn handle_client_message(
                 "payload": relay_payload,
             });
             if let Ok(text) = serde_json::to_string(&envelope) {
-                let dispatched = state.send_to_subjects(&target_subjects, text, true, None);
+                let dispatched = state.send_to_subjects(&relay_targets.subjects, text, true, None);
                 info!(
                     user_id = %info.user_id,
                     connection_id = %connection_id,
                     msg_type = %msg_type,
-                    subject_count = target_subjects.len(),
-                    subjects = %target_subjects.join(","),
+                    subject_count = relay_targets.subjects.len(),
+                    subjects = %relay_targets.subjects.join(","),
                     attempted = dispatched.attempted_count,
                     enqueued = dispatched.enqueued_count,
                     "subjects relay dispatch"
@@ -226,7 +281,7 @@ pub async fn handle_client_message(
         "command_type": msg_type,
         "routing_class": command_spec.routing_class.as_str(),
         "semantic_type": command_spec.message_type.as_str(),
-        "dispatch_plan": dispatch_steps,
+        "runtime_path": runtime_path,
     });
 
     if let Some(redis) = redis {
@@ -259,40 +314,51 @@ fn send_gateway_command_error(
     }
 }
 
-fn collect_target_subjects(data: &Value) -> Vec<String> {
+struct RelayTargets {
+    emails: Vec<String>,
+    subjects: Vec<String>,
+}
+
+fn collect_relay_targets(data: &Value) -> RelayTargets {
+    let mut emails = Vec::new();
     let mut subjects = Vec::new();
     if let Some(target) = data.get("to").and_then(|value| value.as_str()) {
-        append_subject_variants(target, &mut subjects);
+        append_target_variants(target, &mut emails, &mut subjects);
     }
     if let Some(items) = data.get("recipients").and_then(|value| value.as_array()) {
         for item in items {
             if let Some(email) = item.as_str() {
-                append_subject_variants(email, &mut subjects);
+                append_target_variants(email, &mut emails, &mut subjects);
             }
         }
     }
+    emails.sort();
+    emails.dedup();
     subjects.sort();
     subjects.dedup();
-    subjects
+    RelayTargets { emails, subjects }
 }
 
-fn append_subject_variants(value: &str, out: &mut Vec<String>) {
+fn append_target_variants(value: &str, emails: &mut Vec<String>, subjects: &mut Vec<String>) {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return;
     }
-    out.push(format!("user:{trimmed}"));
     let normalized = trimmed.to_lowercase();
-    if normalized != trimmed {
-        out.push(format!("user:{normalized}"));
-    }
+    emails.push(normalized.clone());
+    subjects.push(format!("user:{trimmed}"));
+    subjects.push(format!("user:{normalized}"));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::state::{GatewayState, OutboundMessage};
+    use crate::routes::{AudienceScopeMode, RelayContextType};
+    use crate::state::{
+        GatewayState, OutboundMessage, RelayAudienceScope, RelayContextSnapshot, RelayContextState,
+        RelayGrant, RelayOperationContext,
+    };
     use tokio::sync::mpsc::UnboundedReceiver;
     use tokio::time::{timeout, Duration};
 
@@ -360,6 +426,46 @@ mod tests {
             .get("payload")
             .cloned()
             .expect("missing payload field")
+    }
+
+    fn apply_file_transfer_context(
+        state: &GatewayState,
+        sender: &str,
+        peer: &str,
+        operation_key: &str,
+        status: RelayContextState,
+        policy_version: u64,
+    ) {
+        let now = chrono::Utc::now().timestamp();
+        state.apply_relay_context_snapshot(RelayContextSnapshot {
+            subject_email: sender.to_string(),
+            context_type: RelayContextType::FileTransferPeer,
+            policy_version,
+            received_at: now,
+            contexts: vec![RelayOperationContext {
+                context_id: format!("opx-{}", operation_key),
+                operation_key: operation_key.to_string(),
+                operation_class: "relay_hotpath".to_string(),
+                context_type: RelayContextType::FileTransferPeer,
+                state: status,
+                authorized_subject: sender.to_string(),
+                audience_scope: RelayAudienceScope {
+                    mode: AudienceScopeMode::FixedPeer,
+                    peers: vec![peer.to_string()],
+                },
+                allowed_command_families: vec!["file_transfer".to_string()],
+                policy_version,
+                grant: RelayGrant {
+                    grant_id: format!("grant-{}-{}", sender, peer),
+                    policy_version,
+                    issued_at: now,
+                    expires_at: now + 3600,
+                },
+                opened_at: now,
+                updated_at: now,
+                expires_at: now + 3600,
+            }],
+        });
     }
 
     #[tokio::test]
@@ -437,6 +543,14 @@ mod tests {
         let config = test_config();
         let (alice_info, mut alice_rx) = register_user_connection(&state, "conn-a", "alice@test.de");
         let (_bob_info, mut bob_rx) = register_user_connection(&state, "conn-b", "bob@test.de");
+        apply_file_transfer_context(
+            &state,
+            "alice@test.de",
+            "bob@test.de",
+            "ft-1",
+            RelayContextState::Active,
+            1,
+        );
 
         handle_client_message(
             &state,
@@ -462,6 +576,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relay_hotpath_rejects_without_context() {
+        let state = GatewayState::new(None);
+        let config = test_config();
+        let (alice_info, mut alice_rx) = register_user_connection(&state, "conn-a", "alice@test.de");
+        let (_bob_info, mut bob_rx) = register_user_connection(&state, "conn-b", "bob@test.de");
+
+        handle_client_message(
+            &state,
+            "conn-a",
+            &alice_info,
+            r#"{"type":"file_transfer_chunk","transfer_id":"ft-1","to":"bob@test.de","index":0}"#.to_string(),
+            &config,
+            None,
+        )
+        .await;
+
+        let outbound = recv_text(&mut alice_rx).await.expect("expected relay auth error");
+        let payload = extract_inner_payload(&outbound);
+        assert_eq!(payload.get("type").and_then(Value::as_str), Some("gateway_command_error"));
+        assert_eq!(
+            payload.get("error").and_then(Value::as_str),
+            Some("relay_context_missing")
+        );
+        assert_no_message(&mut bob_rx).await;
+    }
+
+    #[tokio::test]
     async fn relay_hotpath_without_target_is_rejected() {
         let state = GatewayState::new(None);
         let config = test_config();
@@ -483,6 +624,191 @@ mod tests {
         assert_eq!(
             payload.get("error").and_then(Value::as_str),
             Some("invalid_relay_targets")
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_hotpath_rejects_revoked_context() {
+        let state = GatewayState::new(None);
+        let config = test_config();
+        let (alice_info, mut alice_rx) = register_user_connection(&state, "conn-a", "alice@test.de");
+        let (_bob_info, mut bob_rx) = register_user_connection(&state, "conn-b", "bob@test.de");
+        apply_file_transfer_context(
+            &state,
+            "alice@test.de",
+            "bob@test.de",
+            "ft-1",
+            RelayContextState::Revoked,
+            4,
+        );
+
+        handle_client_message(
+            &state,
+            "conn-a",
+            &alice_info,
+            r#"{"type":"file_transfer_chunk","transfer_id":"ft-1","to":"bob@test.de","index":0}"#.to_string(),
+            &config,
+            None,
+        )
+        .await;
+
+        let outbound = recv_text(&mut alice_rx).await.expect("expected revoked error");
+        let payload = extract_inner_payload(&outbound);
+        assert_eq!(payload.get("error").and_then(Value::as_str), Some("relay_context_revoked"));
+        assert_no_message(&mut bob_rx).await;
+    }
+
+    #[tokio::test]
+    async fn relay_hotpath_rejects_closed_context() {
+        let state = GatewayState::new(None);
+        let config = test_config();
+        let (alice_info, mut alice_rx) = register_user_connection(&state, "conn-a", "alice@test.de");
+        let (_bob_info, mut bob_rx) = register_user_connection(&state, "conn-b", "bob@test.de");
+        apply_file_transfer_context(
+            &state,
+            "alice@test.de",
+            "bob@test.de",
+            "ft-1",
+            RelayContextState::Closed,
+            5,
+        );
+
+        handle_client_message(
+            &state,
+            "conn-a",
+            &alice_info,
+            r#"{"type":"file_transfer_chunk","transfer_id":"ft-1","to":"bob@test.de","index":0}"#.to_string(),
+            &config,
+            None,
+        )
+        .await;
+
+        let outbound = recv_text(&mut alice_rx).await.expect("expected closed error");
+        let payload = extract_inner_payload(&outbound);
+        assert_eq!(payload.get("error").and_then(Value::as_str), Some("relay_context_closed"));
+        assert_no_message(&mut bob_rx).await;
+    }
+
+    #[tokio::test]
+    async fn relay_hotpath_rejects_policy_version_mismatch() {
+        let state = GatewayState::new(None);
+        let config = test_config();
+        let (alice_info, mut alice_rx) = register_user_connection(&state, "conn-a", "alice@test.de");
+        let (_bob_info, mut bob_rx) = register_user_connection(&state, "conn-b", "bob@test.de");
+        let now = chrono::Utc::now().timestamp();
+        state.apply_relay_context_snapshot(RelayContextSnapshot {
+            subject_email: "alice@test.de".to_string(),
+            context_type: RelayContextType::FileTransferPeer,
+            policy_version: 7,
+            received_at: now,
+            contexts: vec![RelayOperationContext {
+                context_id: "opx-ft-1".to_string(),
+                operation_key: "ft-1".to_string(),
+                operation_class: "relay_hotpath".to_string(),
+                context_type: RelayContextType::FileTransferPeer,
+                state: RelayContextState::Active,
+                authorized_subject: "alice@test.de".to_string(),
+                audience_scope: RelayAudienceScope {
+                    mode: AudienceScopeMode::FixedPeer,
+                    peers: vec!["bob@test.de".to_string()],
+                },
+                allowed_command_families: vec!["file_transfer".to_string()],
+                policy_version: 7,
+                grant: RelayGrant {
+                    grant_id: "grant-1".to_string(),
+                    policy_version: 6,
+                    issued_at: now,
+                    expires_at: now + 3600,
+                },
+                opened_at: now,
+                updated_at: now,
+                expires_at: now + 3600,
+            }],
+        });
+
+        handle_client_message(
+            &state,
+            "conn-a",
+            &alice_info,
+            r#"{"type":"file_transfer_chunk","transfer_id":"ft-1","to":"bob@test.de","index":0}"#.to_string(),
+            &config,
+            None,
+        )
+        .await;
+
+        let outbound = recv_text(&mut alice_rx).await.expect("expected version error");
+        let payload = extract_inner_payload(&outbound);
+        assert_eq!(
+            payload.get("error").and_then(Value::as_str),
+            Some("relay_policy_version_mismatch")
+        );
+        assert_no_message(&mut bob_rx).await;
+    }
+
+    #[tokio::test]
+    async fn relay_hotpath_rejects_scope_violation() {
+        let state = GatewayState::new(None);
+        let config = test_config();
+        let (alice_info, mut alice_rx) = register_user_connection(&state, "conn-a", "alice@test.de");
+        let (_bob_info, mut bob_rx) = register_user_connection(&state, "conn-b", "bob@test.de");
+        apply_file_transfer_context(
+            &state,
+            "alice@test.de",
+            "charlie@test.de",
+            "ft-1",
+            RelayContextState::Active,
+            2,
+        );
+
+        handle_client_message(
+            &state,
+            "conn-a",
+            &alice_info,
+            r#"{"type":"file_transfer_chunk","transfer_id":"ft-1","to":"bob@test.de","index":0}"#.to_string(),
+            &config,
+            None,
+        )
+        .await;
+
+        let outbound = recv_text(&mut alice_rx).await.expect("expected scope violation");
+        let payload = extract_inner_payload(&outbound);
+        assert_eq!(
+            payload.get("error").and_then(Value::as_str),
+            Some("relay_scope_violation")
+        );
+        assert_no_message(&mut bob_rx).await;
+    }
+
+    #[tokio::test]
+    async fn relay_hotpath_rejects_replay_nonce() {
+        let state = GatewayState::new(None);
+        let config = test_config();
+        let (alice_info, mut alice_rx) = register_user_connection(&state, "conn-a", "alice@test.de");
+        let (_bob_info, mut bob_rx) = register_user_connection(&state, "conn-b", "bob@test.de");
+        apply_file_transfer_context(
+            &state,
+            "alice@test.de",
+            "bob@test.de",
+            "ft-1",
+            RelayContextState::Active,
+            3,
+        );
+
+        let message = r#"{"type":"file_transfer_chunk","transfer_id":"ft-1","to":"bob@test.de","nonce":"n-1","ciphertext":"abc"}"#.to_string();
+        handle_client_message(&state, "conn-a", &alice_info, message.clone(), &config, None).await;
+        let first = recv_text(&mut bob_rx).await.expect("first chunk should pass");
+        let first_payload = extract_inner_payload(&first);
+        assert_eq!(
+            first_payload.get("type").and_then(Value::as_str),
+            Some("file_transfer_chunk")
+        );
+
+        handle_client_message(&state, "conn-a", &alice_info, message, &config, None).await;
+        let outbound = recv_text(&mut alice_rx).await.expect("expected replay rejection");
+        let payload = extract_inner_payload(&outbound);
+        assert_eq!(
+            payload.get("error").and_then(Value::as_str),
+            Some("relay_replay_detected")
         );
     }
 

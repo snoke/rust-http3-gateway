@@ -10,6 +10,7 @@ mod gateway_core;
 mod http_api;
 mod message;
 mod preauth;
+mod project;
 mod routes;
 mod state;
 mod transport;

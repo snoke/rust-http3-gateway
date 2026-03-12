@@ -1,25 +1,9 @@
-use std::collections::HashMap;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DispatchStep {
-    Symfony,
-    Subjects,
-}
-
-impl DispatchStep {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Symfony => "symfony",
-            Self::Subjects => "subjects",
-        }
-    }
-}
-
-pub type DispatchPlan = &'static [DispatchStep];
+use serde::Serialize;
+use crate::project::command_registry::{COMMAND_REGISTRY, RELAY_AUTHORIZATION_REGISTRY};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RoutingClass {
-    PreAuth,
+    NoAuth,
     GatewayLocal,
     RelayHotpath,
     BackendControl,
@@ -28,7 +12,7 @@ pub enum RoutingClass {
 impl RoutingClass {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::PreAuth => "preauth",
+            Self::NoAuth => "no_auth",
             Self::GatewayLocal => "gateway_local",
             Self::RelayHotpath => "relay_hotpath",
             Self::BackendControl => "backend_control",
@@ -57,905 +41,97 @@ impl MessageSemanticType {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum RelayContextType {
+    FileTransferPeer,
+}
+
+impl RelayContextType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FileTransferPeer => "file_transfer_peer",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum AudienceScopeMode {
+    FixedPeer,
+    ContextMembers,
+    ExplicitSubset,
+}
+
+impl AudienceScopeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FixedPeer => "fixed_peer",
+            Self::ContextMembers => "context_members",
+            Self::ExplicitSubset => "explicit_subset",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum RelayGuardClass {
+    ContextBoundPeer,
+}
+
+impl RelayGuardClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ContextBoundPeer => "context_bound_peer",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RelayAuthorizationSpec {
+    pub requires_relay_context: bool,
+    pub relay_context_type: RelayContextType,
+    pub audience_scope_mode: AudienceScopeMode,
+    pub guard_class: RelayGuardClass,
+    pub command_family: &'static str,
+    pub operation_key_field: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RelayAuthorizationEntry {
+    pub command_name: &'static str,
+    pub spec: RelayAuthorizationSpec,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct CommandSpec {
     pub command_name: &'static str,
     pub routing_class: RoutingClass,
     pub message_type: MessageSemanticType,
-    pub dispatch_plan: DispatchPlan,
-    pub owner: &'static str,
-    pub deprecated: bool,
-    pub notes: Option<&'static str>,
+    pub mirror_to_backend: bool,
 }
-
-const NO_DISPATCH: DispatchPlan = &[];
-const SYMFONY_ONLY: DispatchPlan = &[DispatchStep::Symfony];
-const SUBJECTS_ONLY: DispatchPlan = &[DispatchStep::Subjects];
-
-pub const COMMAND_REGISTRY: &[CommandSpec] = &[
-    CommandSpec {
-        command_name: "auth",
-        routing_class: RoutingClass::PreAuth,
-        message_type: MessageSemanticType::Technical,
-        dispatch_plan: NO_DISPATCH,
-        owner: "auth",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "auth_login_request",
-        routing_class: RoutingClass::PreAuth,
-        message_type: MessageSemanticType::Technical,
-        dispatch_plan: NO_DISPATCH,
-        owner: "auth",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "auth_register_request",
-        routing_class: RoutingClass::PreAuth,
-        message_type: MessageSemanticType::Technical,
-        dispatch_plan: NO_DISPATCH,
-        owner: "auth",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "auth_identity_request",
-        routing_class: RoutingClass::PreAuth,
-        message_type: MessageSemanticType::Technical,
-        dispatch_plan: NO_DISPATCH,
-        owner: "auth",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "dropbox_public_auth",
-        routing_class: RoutingClass::PreAuth,
-        message_type: MessageSemanticType::Technical,
-        dispatch_plan: NO_DISPATCH,
-        owner: "dropbox",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "ping",
-        routing_class: RoutingClass::GatewayLocal,
-        message_type: MessageSemanticType::Technical,
-        dispatch_plan: NO_DISPATCH,
-        owner: "gateway",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "bootstrap_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "core",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "online_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "core",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "users_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "core",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "mls_key_package_publish",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "mls",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "mls_key_package_fetch",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "mls",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "contact_unblock",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "contact_book",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "contacts_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "contact_book",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "contact_profiles_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "contact_book",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "attachment_upload_init",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "attachments",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "attachment_upload_chunk",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "attachments",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "attachment_upload_finalize",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "attachments",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "audit_timeline_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "audit",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "audit_timeline_export_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "audit",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "attachment_download_chunk",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "attachments",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "attachment_list_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "attachments",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "attachment_delete_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "attachments",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "user_storage_upload_init",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "user_storage",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "user_storage_upload_resume_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "user_storage",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "user_storage_upload_chunk",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "user_storage",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "user_storage_upload_finalize",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "user_storage",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "user_storage_download_chunk",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "user_storage",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "user_storage_list_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "user_storage",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "user_storage_delete_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "user_storage",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "user_storage_share_link_create",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "user_storage",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "user_storage_share_links_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "user_storage",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "user_storage_share_link_revoke",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "user_storage",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "user_storage_share_info_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "user_storage",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "user_storage_share_download_chunk",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "user_storage",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "contact_add",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "contact_book",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "contact_accept",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "contact_book",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "contact_block",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "contact_book",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "contact_profile_upsert",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "contact_book",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "contact_profile_delete",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "contact_book",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "deadman_config_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "deadman",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "deadman_config_upsert",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "deadman",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "dropbox_endpoints_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "dropbox",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "dropbox_endpoint_upsert",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "dropbox",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "dropbox_endpoint_delete",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "dropbox",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "dropbox_messages_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "dropbox",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "dropbox_message_delete",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "dropbox",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "dropbox_public_info_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "dropbox",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "dropbox_public_submit",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "dropbox",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "chat_conversations_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "chat",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "chat_conversation_open",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "chat",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "chat_messages_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "chat",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "group_create",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "chat",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "group_add",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "chat",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "group_leave",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "chat",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "group_membership_accept",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "chat",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "history_clear",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "chat",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "identity_profile_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "identity",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "identity_profile_upsert",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "identity",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "key_trust_list_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "key_trust",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "key_trust_upsert",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "key_trust",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "key_trust_delete",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "key_trust",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "mls_commit",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "mls",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "mls_welcome_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "mls",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "mls_welcome_ack",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "mls",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "presence_state",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Signal,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "presence",
-        deprecated: false,
-        notes: Some("consolidated to backend_control until deterministic relay targets exist"),
-    },
-    CommandSpec {
-        command_name: "chat_typing_state",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Signal,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "chat",
-        deprecated: false,
-        notes: Some("consolidated to backend_control until deterministic relay targets exist"),
-    },
-    CommandSpec {
-        command_name: "chat_message_read",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "chat",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "call_token_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "calls",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "call_session_create",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "calls",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "call_session_invite",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "calls",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "call_session_join",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "calls",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "call_session_leave",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "calls",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "call_session_media_key",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Signal,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "calls",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "call_session_mute",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Signal,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "calls",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "call_session_camera",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Signal,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "calls",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "call_session_token_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "calls",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "call_invite",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "calls",
-        deprecated: true,
-        notes: Some("legacy call_* path; migrate to call_session_*"),
-    },
-    CommandSpec {
-        command_name: "call_join",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "calls",
-        deprecated: true,
-        notes: Some("legacy call_* path; migrate to call_session_*"),
-    },
-    CommandSpec {
-        command_name: "call_leave",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "calls",
-        deprecated: true,
-        notes: Some("legacy call_* path; migrate to call_session_*"),
-    },
-    CommandSpec {
-        command_name: "call_mute",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Signal,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "calls",
-        deprecated: true,
-        notes: Some("legacy call_* path; migrate to call_session_*"),
-    },
-    CommandSpec {
-        command_name: "call_camera",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Signal,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "calls",
-        deprecated: true,
-        notes: Some("legacy call_* path; migrate to call_session_*"),
-    },
-    CommandSpec {
-        command_name: "call_media_key",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Signal,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "calls",
-        deprecated: true,
-        notes: Some("legacy call_* path; migrate to call_session_*"),
-    },
-    CommandSpec {
-        command_name: "file_transfer_offer",
-        routing_class: RoutingClass::RelayHotpath,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SUBJECTS_ONLY,
-        owner: "file_transfer",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "file_transfer_accept",
-        routing_class: RoutingClass::RelayHotpath,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SUBJECTS_ONLY,
-        owner: "file_transfer",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "file_transfer_reject",
-        routing_class: RoutingClass::RelayHotpath,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SUBJECTS_ONLY,
-        owner: "file_transfer",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "file_transfer_handshake",
-        routing_class: RoutingClass::RelayHotpath,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SUBJECTS_ONLY,
-        owner: "file_transfer",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "file_transfer_handshake_ack",
-        routing_class: RoutingClass::RelayHotpath,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SUBJECTS_ONLY,
-        owner: "file_transfer",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "file_transfer_welcome",
-        routing_class: RoutingClass::RelayHotpath,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SUBJECTS_ONLY,
-        owner: "file_transfer",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "file_transfer_file_key",
-        routing_class: RoutingClass::RelayHotpath,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SUBJECTS_ONLY,
-        owner: "file_transfer",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "file_transfer_file_key_ack",
-        routing_class: RoutingClass::RelayHotpath,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SUBJECTS_ONLY,
-        owner: "file_transfer",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "file_transfer_chunk",
-        routing_class: RoutingClass::RelayHotpath,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SUBJECTS_ONLY,
-        owner: "file_transfer",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "file_transfer_complete",
-        routing_class: RoutingClass::RelayHotpath,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SUBJECTS_ONLY,
-        owner: "file_transfer",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "file_transfer_cancel",
-        routing_class: RoutingClass::RelayHotpath,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SUBJECTS_ONLY,
-        owner: "file_transfer",
-        deprecated: false,
-        notes: None,
-    },
-    CommandSpec {
-        command_name: "chat_message_send",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Command,
-        dispatch_plan: SYMFONY_ONLY,
-        owner: "chat",
-        deprecated: false,
-        notes: Some("consolidated to backend_control to avoid route/runtime drift"),
-    },
-];
 
 pub fn command_registry() -> &'static [CommandSpec] {
     COMMAND_REGISTRY
 }
 
 pub fn resolve_command_spec(command_type: &str) -> Option<&'static CommandSpec> {
-    COMMAND_REGISTRY
+    command_registry()
         .iter()
         .find(|spec| spec.command_name == command_type)
-}
-
-pub fn resolve_dispatch_plan(command_type: &str) -> Option<DispatchPlan> {
-    let spec = resolve_command_spec(command_type)?;
-    match spec.routing_class {
-        RoutingClass::RelayHotpath | RoutingClass::BackendControl => Some(spec.dispatch_plan),
-        RoutingClass::PreAuth | RoutingClass::GatewayLocal => None,
-    }
 }
 
 pub fn resolve_message_type(command_type: &str) -> Option<MessageSemanticType> {
     resolve_command_spec(command_type).map(|spec| spec.message_type)
 }
 
-pub fn command_route_map() -> HashMap<&'static str, DispatchPlan> {
-    let mut map = HashMap::new();
-    for spec in COMMAND_REGISTRY {
-        if let Some(plan) = resolve_dispatch_plan(spec.command_name) {
-            map.insert(spec.command_name, plan);
-        }
-    }
-    map
+pub fn resolve_relay_authorization_spec(command_type: &str) -> Option<RelayAuthorizationSpec> {
+    RELAY_AUTHORIZATION_REGISTRY
+        .iter()
+        .find(|entry| entry.command_name == command_type)
+        .map(|entry| entry.spec)
 }
 
 pub fn validate_command_registry() -> Result<(), String> {
     let mut seen = std::collections::HashSet::new();
-    for spec in COMMAND_REGISTRY {
+    for spec in command_registry() {
         if spec.command_name.trim().is_empty() {
             return Err("command registry contains empty command name".to_string());
         }
@@ -973,7 +149,7 @@ pub fn validate_command_registry() -> Result<(), String> {
         }
 
         match spec.routing_class {
-            RoutingClass::PreAuth | RoutingClass::GatewayLocal => {
+            RoutingClass::NoAuth | RoutingClass::GatewayLocal => {
                 if !matches!(spec.message_type, MessageSemanticType::Technical) {
                     return Err(format!(
                         "command '{}' with routing class '{}' must use semantic type 'technical'",
@@ -981,9 +157,9 @@ pub fn validate_command_registry() -> Result<(), String> {
                         spec.routing_class.as_str()
                     ));
                 }
-                if !spec.dispatch_plan.is_empty() {
+                if spec.mirror_to_backend {
                     return Err(format!(
-                        "command '{}' has non-empty dispatch plan for routing class '{}'",
+                        "command '{}' with routing class '{}' cannot set backend mirror",
                         spec.command_name,
                         spec.routing_class.as_str()
                     ));
@@ -996,22 +172,6 @@ pub fn validate_command_registry() -> Result<(), String> {
                         spec.command_name
                     ));
                 }
-                if spec.dispatch_plan.is_empty() {
-                    return Err(format!(
-                        "relay command '{}' must define a dispatch plan",
-                        spec.command_name
-                    ));
-                }
-                if !spec
-                    .dispatch_plan
-                    .iter()
-                    .any(|step| matches!(step, DispatchStep::Subjects))
-                {
-                    return Err(format!(
-                        "relay command '{}' must contain a subjects dispatch step",
-                        spec.command_name
-                    ));
-                }
             }
             RoutingClass::BackendControl => {
                 if matches!(spec.message_type, MessageSemanticType::Technical) {
@@ -1020,23 +180,51 @@ pub fn validate_command_registry() -> Result<(), String> {
                         spec.command_name
                     ));
                 }
-                if spec.dispatch_plan.is_empty() {
+                if spec.mirror_to_backend {
                     return Err(format!(
-                        "backend control command '{}' must define a dispatch plan",
-                        spec.command_name
-                    ));
-                }
-                if !spec
-                    .dispatch_plan
-                    .iter()
-                    .any(|step| matches!(step, DispatchStep::Symfony))
-                {
-                    return Err(format!(
-                        "backend control command '{}' must contain a symfony dispatch step",
+                        "backend control command '{}' cannot set backend mirror",
                         spec.command_name
                     ));
                 }
             }
+        }
+    }
+
+    let relay_commands: Vec<&str> = command_registry()
+        .iter()
+        .filter(|spec| matches!(spec.routing_class, RoutingClass::RelayHotpath))
+        .map(|spec| spec.command_name)
+        .collect();
+    for command in relay_commands {
+        let Some(auth_spec) = resolve_relay_authorization_spec(command) else {
+            return Err(format!(
+                "relay command '{}' is missing relay authorization metadata",
+                command
+            ));
+        };
+        if auth_spec.command_family.trim().is_empty() {
+            return Err(format!(
+                "relay command '{}' has empty relay command family",
+                command
+            ));
+        }
+        if auth_spec.operation_key_field.trim().is_empty() {
+            return Err(format!(
+                "relay command '{}' has empty relay operation key field",
+                command
+            ));
+        }
+    }
+
+    for spec in command_registry()
+        .iter()
+        .filter(|spec| !matches!(spec.routing_class, RoutingClass::RelayHotpath))
+    {
+        if resolve_relay_authorization_spec(spec.command_name).is_some() {
+            return Err(format!(
+                "non-relay command '{}' declares relay authorization metadata",
+                spec.command_name
+            ));
         }
     }
 
@@ -1046,6 +234,9 @@ pub fn validate_command_registry() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::registry_contract_config::{
+        BACKEND_HANDLER_MAP_PATH, FRONTEND_EMITTER_TYPE_FILES, FRONTEND_IGNORED_TYPE_LITERALS,
+    };
     use std::collections::HashSet;
     use std::fs;
     use std::path::PathBuf;
@@ -1087,7 +278,8 @@ mod tests {
                     return None;
                 }
                 let mut literals = extract_single_quoted_literals(trimmed);
-                literals.drain(..1).next()
+                let first = literals.drain(..1).next();
+                first
             })
             .collect()
     }
@@ -1114,7 +306,7 @@ mod tests {
     #[test]
     fn backend_control_commands_have_backend_handlers() {
         let root = project_root();
-        let backend_map = root.join("symfony/src/Void/Interface/Realtime/MessageHandlerCollection.php");
+        let backend_map = root.join(BACKEND_HANDLER_MAP_PATH);
         let backend_types = parse_backend_handler_types(&backend_map);
 
         for spec in command_registry() {
@@ -1133,38 +325,11 @@ mod tests {
     fn selected_frontend_emitter_types_are_registered_or_explicitly_ignored() {
         let root = project_root();
         let registry = registry_names();
-        let files = [
-            "frontend/src/app/core/messaging/services/messenger/transport.ts",
-            "frontend/src/app/core/messaging/services/messenger/send.ts",
-            "frontend/src/app/core/messaging/services/messenger/conversation.ts",
-            "frontend/src/app/core/messaging/services/messenger.ts",
-            "frontend/src/plugins/file-transfer/services/fileTransferService.ts",
-            "frontend/src/plugins/calls/services/callManager.ts",
-            "frontend/src/plugins/auth/app/services/auth.ts",
-            "frontend/src/plugins/anonymous-dropbox/services/dropboxApi.ts",
-            "frontend/src/plugins/contact-book/components/ContactBookHome.vue",
-            "frontend/src/plugins/components/useRealtimeContactOptions.ts",
-            "frontend/src/plugins/identity/components/ClientsList.vue",
-            "frontend/src/plugins/chat/components/ChatDesktopHome.vue",
-        ];
-        let ignored_literals: HashSet<&str> = [
-            "idle",
-            "ok",
-            "error",
-            "group",
-            "direct",
-            "message",
-            "event",
-            "api_key",
-            "chunked_attachment",
-            "chunked_user_storage",
-            "user_storage_folder_share_bundle",
-        ]
-        .into_iter()
-        .collect();
+        let ignored_literals: HashSet<&str> =
+            FRONTEND_IGNORED_TYPE_LITERALS.iter().copied().collect();
 
         let mut unknown = Vec::new();
-        for rel in files {
+        for rel in FRONTEND_EMITTER_TYPE_FILES {
             let path = root.join(rel);
             for literal in parse_frontend_type_literals(&path) {
                 let looks_like_command =
@@ -1185,26 +350,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_call_commands_are_explicitly_deprecated() {
-        let expected_legacy = [
-            "call_invite",
-            "call_join",
-            "call_leave",
-            "call_mute",
-            "call_camera",
-            "call_media_key",
-        ];
-        for command in expected_legacy {
-            let spec = resolve_command_spec(command).expect("legacy command must exist in registry");
-            assert_eq!(spec.routing_class, RoutingClass::BackendControl);
-            assert!(spec.deprecated, "legacy command '{command}' must be marked deprecated");
-        }
-    }
-
-    #[test]
     fn critical_commands_have_expected_routing_classes() {
         let cases = [
-            ("auth_login_request", RoutingClass::PreAuth),
+            ("auth_login_request", RoutingClass::NoAuth),
             ("ping", RoutingClass::GatewayLocal),
             ("chat_message_send", RoutingClass::BackendControl),
             ("chat_typing_state", RoutingClass::BackendControl),
@@ -1246,6 +394,27 @@ mod tests {
                 "critical command '{}' has unexpected semantic type",
                 command
             );
+        }
+    }
+
+    #[test]
+    fn relay_hotpath_commands_require_relay_authorization_metadata() {
+        for spec in command_registry() {
+            if !matches!(spec.routing_class, RoutingClass::RelayHotpath) {
+                continue;
+            }
+            let relay = resolve_relay_authorization_spec(spec.command_name)
+                .expect("relay command must have relay auth metadata");
+            if spec.command_name == "file_transfer_offer" {
+                assert!(!relay.requires_relay_context);
+            } else {
+                assert!(relay.requires_relay_context);
+            }
+            assert_eq!(relay.command_family, "file_transfer");
+            assert_eq!(relay.operation_key_field, "transfer_id");
+            assert_eq!(relay.relay_context_type, RelayContextType::FileTransferPeer);
+            assert_eq!(relay.audience_scope_mode, AudienceScopeMode::FixedPeer);
+            assert_eq!(relay.guard_class, RelayGuardClass::ContextBoundPeer);
         }
     }
 }

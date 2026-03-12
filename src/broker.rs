@@ -2,7 +2,11 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 
 use crate::config::Config;
-use crate::state::{DispatchResult, GatewayState};
+use crate::routes::{AudienceScopeMode, RelayContextType};
+use crate::state::{
+    DispatchResult, GatewayState, RelayAudienceScope, RelayContextSnapshot, RelayContextState,
+    RelayGrant, RelayOperationContext,
+};
 
 #[derive(Clone, Copy, Debug)]
 enum DeliveryMode {
@@ -26,6 +30,195 @@ fn extract_request_id(payload: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string())
+}
+
+fn parse_context_type(value: &str) -> Option<RelayContextType> {
+    match value.trim().to_lowercase().as_str() {
+        "file_transfer_peer" => Some(RelayContextType::FileTransferPeer),
+        _ => None,
+    }
+}
+
+fn parse_scope_mode(value: &str) -> Option<AudienceScopeMode> {
+    match value.trim().to_lowercase().as_str() {
+        "fixed_peer" => Some(AudienceScopeMode::FixedPeer),
+        "context_members" => Some(AudienceScopeMode::ContextMembers),
+        "explicit_subset" => Some(AudienceScopeMode::ExplicitSubset),
+        _ => None,
+    }
+}
+
+fn parse_context_state(value: &str) -> Option<RelayContextState> {
+    match value.trim().to_lowercase().as_str() {
+        "opened" => Some(RelayContextState::Opened),
+        "active" => Some(RelayContextState::Active),
+        "revoked" => Some(RelayContextState::Revoked),
+        "closed" => Some(RelayContextState::Closed),
+        "policy_version_bumped" => Some(RelayContextState::PolicyVersionBumped),
+        _ => None,
+    }
+}
+
+fn parse_u64(value: Option<&Value>) -> Option<u64> {
+    value.and_then(|item| {
+        if let Some(parsed) = item.as_u64() {
+            return Some(parsed);
+        }
+        item.as_i64()
+            .and_then(|parsed| if parsed > 0 { Some(parsed as u64) } else { None })
+    })
+}
+
+fn parse_i64(value: Option<&Value>) -> Option<i64> {
+    value.and_then(|item| item.as_i64())
+}
+
+fn parse_relay_context_snapshot(payload: &Value) -> Option<RelayContextSnapshot> {
+    let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
+    if payload_type != "gateway_relay_context_snapshot" {
+        return None;
+    }
+    let operation_class = payload
+        .get("operation_class")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    if operation_class != "relay_hotpath" {
+        return None;
+    }
+    let subject_email = payload
+        .get("subject")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let context_type = parse_context_type(
+        payload
+            .get("context_type")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    )?;
+    let policy_version = parse_u64(payload.get("policy_version"))?;
+    let received_at = parse_i64(payload.get("ts")).unwrap_or_else(|| chrono::Utc::now().timestamp());
+    let default_ttl = parse_i64(payload.get("default_ttl_seconds")).unwrap_or(24 * 60 * 60);
+    let contexts = payload
+        .get("contexts")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let object = item.as_object()?;
+                    let context_id = object
+                        .get("context_id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())?
+                        .to_string();
+                    let operation_key = object
+                        .get("operation_key")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())?
+                        .to_string();
+                    let authorized_subject = object
+                        .get("authorized_subject")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())?
+                        .to_string();
+                    let state = parse_context_state(
+                        object
+                            .get("state")
+                            .and_then(Value::as_str)
+                            .unwrap_or("active"),
+                    )?;
+                    let context_policy_version =
+                        parse_u64(object.get("policy_version")).unwrap_or(policy_version);
+                    let opened_at =
+                        parse_i64(object.get("opened_at")).unwrap_or(received_at);
+                    let updated_at =
+                        parse_i64(object.get("updated_at")).unwrap_or(received_at);
+                    let expires_at = parse_i64(object.get("expires_at"))
+                        .unwrap_or(received_at.saturating_add(default_ttl));
+
+                    let grant_obj = object.get("grant").and_then(Value::as_object)?;
+                    let grant_id = grant_obj
+                        .get("grant_id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())?
+                        .to_string();
+                    let grant_policy_version = parse_u64(grant_obj.get("policy_version"))
+                        .unwrap_or(context_policy_version);
+                    let grant_issued_at = parse_i64(grant_obj.get("issued_at")).unwrap_or(received_at);
+                    let grant_expires_at = parse_i64(grant_obj.get("expires_at")).unwrap_or(expires_at);
+
+                    let scope_obj = object.get("audience_scope").and_then(Value::as_object)?;
+                    let scope_mode = parse_scope_mode(
+                        scope_obj
+                            .get("mode")
+                            .and_then(Value::as_str)
+                            .unwrap_or(""),
+                    )?;
+                    let peers = scope_obj
+                        .get("peers")
+                        .and_then(Value::as_array)
+                        .map(|values| {
+                            values
+                                .iter()
+                                .filter_map(|entry| entry.as_str().map(str::to_string))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+
+                    let allowed_families = object
+                        .get("allowed_command_families")
+                        .and_then(Value::as_array)
+                        .map(|values| {
+                            values
+                                .iter()
+                                .filter_map(|entry| entry.as_str().map(str::to_string))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+
+                    Some(RelayOperationContext {
+                        context_id,
+                        operation_key,
+                        operation_class: "relay_hotpath".to_string(),
+                        context_type,
+                        state,
+                        authorized_subject,
+                        audience_scope: RelayAudienceScope {
+                            mode: scope_mode,
+                            peers,
+                        },
+                        allowed_command_families: allowed_families,
+                        policy_version: context_policy_version,
+                        grant: RelayGrant {
+                            grant_id,
+                            policy_version: grant_policy_version,
+                            issued_at: grant_issued_at,
+                            expires_at: grant_expires_at,
+                        },
+                        opened_at,
+                        updated_at,
+                        expires_at,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Some(RelayContextSnapshot {
+        subject_email,
+        context_type,
+        policy_version,
+        contexts,
+        received_at,
+    })
 }
 
 pub async fn publish_event(
@@ -123,6 +316,11 @@ pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: r
                 }
 
                 let payload = decoded.get("payload").cloned().unwrap_or(Value::Null);
+                if let Some(snapshot) = parse_relay_context_snapshot(&payload) {
+                    state.apply_relay_context_snapshot(snapshot);
+                    info!(payload_type = "gateway_relay_context_snapshot", "relay context snapshot applied");
+                    continue;
+                }
                 let request_id = extract_request_id(&payload);
                 let payload_type = payload
                     .get("type")
