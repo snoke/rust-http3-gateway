@@ -83,6 +83,30 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         mirror_to_backend: false,
     },
     CommandSpec {
+        command_name: "notifications_request",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Query,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
+        command_name: "notification_ack",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
+        command_name: "notification_seen",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
+        command_name: "notification_dismiss",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
         command_name: "contact_profiles_request",
         routing_class: RoutingClass::BackendControl,
         message_type: MessageSemanticType::Query,
