@@ -90,15 +90,29 @@ pub async fn handle_client_message(
         (false, true) => vec!["symfony"],
         (false, false) => vec![],
     };
-    if let Some(request_id) = data
+    let maybe_request_id = data
         .get("request_id")
         .and_then(|value| value.as_str())
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+        .filter(|value| !value.is_empty());
+    if let Some(request_id) = maybe_request_id {
         if has_symfony_step {
             state.bind_request_route(request_id, connection_id, info.user_id.as_str());
+            if msg_type == "call_session_create" {
+                info!(
+                    user_id = %info.user_id,
+                    connection_id = %connection_id,
+                    request_id = %request_id,
+                    "bound request route for call_session_create"
+                );
+            }
         }
+    } else if msg_type == "call_session_create" {
+        info!(
+            user_id = %info.user_id,
+            connection_id = %connection_id,
+            "call_session_create missing request_id (route not bound)"
+        );
     }
     if matches!(
         msg_type,

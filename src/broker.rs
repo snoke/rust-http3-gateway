@@ -359,6 +359,13 @@ pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: r
                                     } else {
                                         state.clear_request_route(req_id);
                                     }
+                                } else {
+                                    info!(
+                                        request_id = %req_id,
+                                        subject_count = subjects.len(),
+                                        subjects = %subjects.join(","),
+                                        "request_response route missing (fallback to subjects)"
+                                    );
                                 }
                             }
                             if !delivered_via_route {
