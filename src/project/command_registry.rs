@@ -29,6 +29,42 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         mirror_to_backend: false,
     },
     CommandSpec {
+        command_name: "user_vault_init",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
+        command_name: "user_vault_fetch",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Query,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
+        command_name: "user_vault_update_password",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
+        command_name: "user_vault_update_recovery",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
+        command_name: "file_key_wrap",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
+        command_name: "file_key_fetch",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Query,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
         command_name: "dropbox_public_auth",
         routing_class: RoutingClass::NoAuth,
         message_type: MessageSemanticType::Technical,
