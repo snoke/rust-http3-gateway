@@ -27,6 +27,5 @@ pub const FRONTEND_IGNORED_TYPE_LITERALS: &[&str] = &[
     "call_session",
     "api_key",
     "chunked_attachment",
-    "chunked_user_storage",
     "user_storage_folder_share_bundle",
 ];

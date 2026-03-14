@@ -167,13 +167,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         mirror_to_backend: false,
     },
     CommandSpec {
-        command_name: "user_storage_upload_resume_request",
-        routing_class: RoutingClass::BackendControl,
-        message_type: MessageSemanticType::Query,
-        mirror_to_backend: false,
-    },
-    CommandSpec {
-        command_name: "user_storage_upload_chunk",
+        command_name: "user_storage_upload_payload",
         routing_class: RoutingClass::BackendControl,
         message_type: MessageSemanticType::Command,
         mirror_to_backend: false,
@@ -185,7 +179,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         mirror_to_backend: false,
     },
     CommandSpec {
-        command_name: "user_storage_download_chunk",
+        command_name: "user_storage_download",
         routing_class: RoutingClass::BackendControl,
         message_type: MessageSemanticType::Query,
         mirror_to_backend: false,
@@ -227,7 +221,7 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         mirror_to_backend: false,
     },
     CommandSpec {
-        command_name: "user_storage_share_download_chunk",
+        command_name: "user_storage_share_download",
         routing_class: RoutingClass::BackendControl,
         message_type: MessageSemanticType::Query,
         mirror_to_backend: false,
