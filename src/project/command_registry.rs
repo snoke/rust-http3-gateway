@@ -425,6 +425,12 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         mirror_to_backend: false,
     },
     CommandSpec {
+        command_name: "signal",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Signal,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
         command_name: "chat_message_read",
         routing_class: RoutingClass::BackendControl,
         message_type: MessageSemanticType::Command,
