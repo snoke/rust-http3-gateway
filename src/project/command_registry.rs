@@ -71,6 +71,12 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         mirror_to_backend: false,
     },
     CommandSpec {
+        command_name: "device_pairing_register_device",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
         command_name: "device_pairing_request",
         routing_class: RoutingClass::BackendControl,
         message_type: MessageSemanticType::Command,

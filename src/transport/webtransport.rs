@@ -174,6 +174,9 @@ impl WebTransportServer {
                                     break;
                                 }
                             }
+                            Some(OutboundMessage::Close { .. }) => {
+                                break;
+                            }
                             None => break,
                         }
                     }

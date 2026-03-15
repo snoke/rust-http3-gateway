@@ -10,6 +10,7 @@ use crate::routes::{AudienceScopeMode, RelayAuthorizationSpec, RelayContextType}
 #[derive(Clone, Debug)]
 pub enum OutboundMessage {
     Text(String),
+    Close { code: u16, reason: String },
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -748,7 +749,7 @@ impl GatewayState {
                 })
                 .collect();
             for stale_id in same_instance_connections {
-                if let Some(info) = self.unregister_connection(&stale_id) {
+                if let Some(info) = self.evict_connection(&stale_id, Some((1000, "reconnect"))) {
                     evicted.push(info);
                 }
             }
@@ -774,7 +775,7 @@ impl GatewayState {
                     (same_user_connections.len() + 1).saturating_sub(max_connections_per_user);
                 for (stale_id, _) in same_user_connections.into_iter().take(overflow) {
                     if stale_id != connection_id {
-                        if let Some(info) = self.unregister_connection(&stale_id) {
+                        if let Some(info) = self.evict_connection(&stale_id, Some((4409, "session_replaced"))) {
                             evicted.push(info);
                         }
                     }
@@ -835,6 +836,18 @@ impl GatewayState {
             return Some(handle.info);
         }
         None
+    }
+
+    fn evict_connection(&self, connection_id: &str, close: Option<(u16, &str)>) -> Option<ConnectionInfo> {
+        if let Some((code, reason)) = close {
+            if let Some(handle) = self.connections.get(connection_id) {
+                let _ = handle.sender.send(OutboundMessage::Close {
+                    code,
+                    reason: reason.to_string(),
+                });
+            }
+        }
+        self.unregister_connection(connection_id)
     }
 
     pub fn list_connections(

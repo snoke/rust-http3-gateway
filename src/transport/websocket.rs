@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::response::Response;
 use axum::routing::get;
@@ -163,6 +163,15 @@ async fn handle_socket_impl(
                         if sender.send(WsMessage::Text(text)).await.is_err() {
                             break;
                         }
+                    }
+                    Some(OutboundMessage::Close { code, reason }) => {
+                        let _ = sender
+                            .send(WsMessage::Close(Some(CloseFrame {
+                                code: code.into(),
+                                reason: reason.into(),
+                            })))
+                            .await;
+                        break;
                     }
                     None => break,
                 }
