@@ -368,6 +368,39 @@ pub async fn resolve_initial_auth(
                 success_payload: Some(payload),
             })
         }
+        "device_pairing_auth" => {
+            let token = auth_payload
+                .get("pairing_endpoint_token")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            if !is_valid_pairing_token(&token) {
+                return Err(PreAuthFailure {
+                    code: "invalid_pairing_token".to_string(),
+                    message: "Invalid pairing token.".to_string(),
+                    request_id,
+                });
+            }
+
+            let guest_connection_id = preauth_config::compose_pairing_guest_user_id(&token);
+
+            let mut payload = json!({
+                "type": "device_pairing_auth_ok",
+                "pairing_endpoint_token": token,
+                "ts": chrono::Utc::now().timestamp(),
+            });
+            if let Some(id) = request_id.clone() {
+                payload["request_id"] = Value::String(id);
+            }
+
+            Ok(PreAuthSuccess {
+                token: None,
+                user_id: Some(guest_connection_id),
+                client_instance_id,
+                success_payload: Some(payload),
+            })
+        }
         _ => Err(PreAuthFailure {
             code: "invalid_auth_type".to_string(),
             message: "Unsupported auth payload type.".to_string(),
@@ -383,6 +416,16 @@ fn is_valid_dropbox_slug(slug: &str) -> bool {
 
     slug.chars()
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+fn is_valid_pairing_token(token: &str) -> bool {
+    if token.is_empty() || token.len() > 191 {
+        return false;
+    }
+
+    token
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == ':')
 }
 
 async fn authenticate_via_http(

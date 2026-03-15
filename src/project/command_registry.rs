@@ -65,6 +65,30 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         mirror_to_backend: false,
     },
     CommandSpec {
+        command_name: "device_pairing_endpoint_create",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
+        command_name: "device_pairing_request",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
+        command_name: "device_pairing_approve",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
+        command_name: "device_pairing_reject",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
         command_name: "file_key_wrap",
         routing_class: RoutingClass::BackendControl,
         message_type: MessageSemanticType::Command,
@@ -78,6 +102,12 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
     },
     CommandSpec {
         command_name: "dropbox_public_auth",
+        routing_class: RoutingClass::NoAuth,
+        message_type: MessageSemanticType::Technical,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
+        command_name: "device_pairing_auth",
         routing_class: RoutingClass::NoAuth,
         message_type: MessageSemanticType::Technical,
         mirror_to_backend: false,

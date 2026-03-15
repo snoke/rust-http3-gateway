@@ -19,6 +19,7 @@ const PREAUTH_HTTP_ROUTES: &[PreAuthHttpRoute] = &[
 ];
 
 const DROPBOX_GUEST_USER_PREFIX: &str = "public-dropbox";
+const PAIRING_GUEST_USER_PREFIX: &str = "pairing";
 
 pub fn resolve_http_path(command_name: &str) -> Option<&'static str> {
     PREAUTH_HTTP_ROUTES
@@ -29,4 +30,8 @@ pub fn resolve_http_path(command_name: &str) -> Option<&'static str> {
 
 pub fn compose_dropbox_guest_user_id(slug: &str, timestamp_micros: i64) -> String {
     format!("{DROPBOX_GUEST_USER_PREFIX}:{slug}:{timestamp_micros}")
+}
+
+pub fn compose_pairing_guest_user_id(token: &str) -> String {
+    format!("{PAIRING_GUEST_USER_PREFIX}:{token}")
 }
