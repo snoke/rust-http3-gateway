@@ -114,6 +114,17 @@ pub async fn handle_client_message(
             "call_session_create missing request_id (route not bound)"
         );
     }
+    if msg_type == "session_ready" {
+        let evicted = state.mark_session_ready(connection_id, info.user_id.as_str());
+        if !evicted.is_empty() {
+            info!(
+                user_id = %info.user_id,
+                connection_id = %connection_id,
+                evicted_count = evicted.len(),
+                "session_ready triggered connection eviction"
+            );
+        }
+    }
     if matches!(
         msg_type,
         "group_create"

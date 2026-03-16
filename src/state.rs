@@ -33,6 +33,12 @@ struct RequestRoute {
     updated_at: i64,
 }
 
+#[derive(Clone, Debug)]
+struct ReadyConnection {
+    user_id: String,
+    ready_at: i64,
+}
+
 const PENDING_MAX_PER_SUBJECT: usize = 256;
 const PENDING_TTL_SECONDS: i64 = 30;
 const REQUEST_ROUTE_TTL_SECONDS: i64 = 120;
@@ -187,6 +193,7 @@ pub struct GatewayState {
     relay_contexts_by_subject: Arc<DashMap<String, RelaySubjectContexts>>,
     relay_replay_cache: Arc<DashMap<String, RelayReplayEntry>>,
     relay_rate_counters: Arc<DashMap<String, RelayRateCounter>>,
+    ready_connections: Arc<DashMap<String, ReadyConnection>>,
     max_connections_per_user: Option<usize>,
 }
 
@@ -206,6 +213,7 @@ impl GatewayState {
             relay_contexts_by_subject: Arc::new(DashMap::new()),
             relay_replay_cache: Arc::new(DashMap::new()),
             relay_rate_counters: Arc::new(DashMap::new()),
+            ready_connections: Arc::new(DashMap::new()),
             max_connections_per_user,
         }
     }
@@ -755,34 +763,6 @@ impl GatewayState {
             }
         }
 
-        // Optional per-user cap on top (0/None => unlimited).
-        let mut same_user_connections: Vec<(String, i64)> = self
-            .connections
-            .iter()
-            .filter_map(|entry| {
-                let existing = &entry.value().info;
-                if existing.user_id != user_id {
-                    return None;
-                }
-                Some((entry.key().clone(), existing.connected_at))
-            })
-            .collect();
-        same_user_connections.sort_by_key(|(_, connected_at)| *connected_at);
-        // Optional cap per user; 0/None means unlimited.
-        if let Some(max_connections_per_user) = self.max_connections_per_user {
-            if same_user_connections.len() >= max_connections_per_user {
-                let overflow =
-                    (same_user_connections.len() + 1).saturating_sub(max_connections_per_user);
-                for (stale_id, _) in same_user_connections.into_iter().take(overflow) {
-                    if stale_id != connection_id {
-                        if let Some(info) = self.evict_connection(&stale_id, Some((4409, "session_replaced"))) {
-                            evicted.push(info);
-                        }
-                    }
-                }
-            }
-        }
-
         let (tx, rx) = mpsc::unbounded_channel();
         let sender = tx.clone();
         let info = ConnectionInfo {
@@ -813,6 +793,7 @@ impl GatewayState {
     pub fn unregister_connection(&self, connection_id: &str) -> Option<ConnectionInfo> {
         let handle = self.connections.remove(connection_id).map(|(_, handle)| handle);
         if let Some(handle) = handle {
+            self.ready_connections.remove(connection_id);
             for subject in &handle.info.subjects {
                 if let Some(entry) = self.subjects.get_mut(subject) {
                     entry.remove(connection_id);
@@ -836,6 +817,59 @@ impl GatewayState {
             return Some(handle.info);
         }
         None
+    }
+
+    pub fn mark_session_ready(&self, connection_id: &str, user_id: &str) -> Vec<ConnectionInfo> {
+        if connection_id.is_empty() || user_id.is_empty() {
+            return Vec::new();
+        }
+
+        let now_ts = Self::now_unix_seconds();
+        self.ready_connections.insert(
+            connection_id.to_string(),
+            ReadyConnection {
+                user_id: user_id.to_string(),
+                ready_at: now_ts,
+            },
+        );
+
+        let Some(max_connections_per_user) = self.max_connections_per_user else {
+            return Vec::new();
+        };
+
+        let mut ready_connections: Vec<(String, i64)> = self
+            .ready_connections
+            .iter()
+            .filter_map(|entry| {
+                let ready = entry.value();
+                if ready.user_id != user_id {
+                    return None;
+                }
+                let id = entry.key().clone();
+                let info = self.connections.get(&id)?;
+                Some((id, info.info.connected_at))
+            })
+            .collect();
+        if ready_connections.len() <= max_connections_per_user {
+            return Vec::new();
+        }
+        ready_connections.sort_by_key(|(_, connected_at)| *connected_at);
+
+        let mut evicted = Vec::new();
+        let overflow = ready_connections.len().saturating_sub(max_connections_per_user);
+        for (stale_id, _) in ready_connections.into_iter() {
+            if evicted.len() >= overflow {
+                break;
+            }
+            if stale_id == connection_id {
+                continue;
+            }
+            if let Some(info) = self.evict_connection(&stale_id, Some((4409, "session_replaced"))) {
+                evicted.push(info);
+            }
+        }
+
+        evicted
     }
 
     fn evict_connection(&self, connection_id: &str, close: Option<(u16, &str)>) -> Option<ConnectionInfo> {
