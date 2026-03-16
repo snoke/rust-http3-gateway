@@ -53,6 +53,12 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         mirror_to_backend: false,
     },
     CommandSpec {
+        command_name: "user_vault_update_user_key",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
         command_name: "user_device_vault_fetch",
         routing_class: RoutingClass::BackendControl,
         message_type: MessageSemanticType::Query,
@@ -62,6 +68,18 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         command_name: "user_device_vault_register",
         routing_class: RoutingClass::BackendControl,
         message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
+        command_name: "conversation_key_init",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
+        command_name: "conversation_key_fetch",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Query,
         mirror_to_backend: false,
     },
     CommandSpec {
