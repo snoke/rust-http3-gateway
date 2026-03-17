@@ -59,6 +59,18 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         mirror_to_backend: false,
     },
     CommandSpec {
+        command_name: "user_identity_vault_register",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
+        command_name: "user_identity_vault_revoke",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
         command_name: "user_device_vault_fetch",
         routing_class: RoutingClass::BackendControl,
         message_type: MessageSemanticType::Query,

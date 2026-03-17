@@ -280,8 +280,7 @@ pub async fn resolve_initial_auth(
                 .unwrap_or("")
                 .to_string();
 
-            if email.is_empty()
-                || key_id.is_empty()
+            if key_id.is_empty()
                 || algorithm.is_empty()
                 || public_key.is_empty()
                 || challenge.is_empty()
@@ -294,17 +293,21 @@ pub async fn resolve_initial_auth(
                 });
             }
 
+            let mut auth_body = json!({
+                "key_id": key_id,
+                "algorithm": algorithm,
+                "public_key": public_key,
+                "challenge": challenge,
+                "signature": signature,
+            });
+            if !email.is_empty() {
+                auth_body["email"] = Value::String(email);
+            }
+
             let (token, user_payload) = authenticate_via_http(
                 config,
                 resolve_preauth_http_path(auth_type.as_str(), request_id.clone())?,
-                json!({
-                    "email": email,
-                    "key_id": key_id,
-                    "algorithm": algorithm,
-                    "public_key": public_key,
-                    "challenge": challenge,
-                    "signature": signature,
-                }),
+                auth_body,
                 request_id.clone(),
             )
             .await?;
