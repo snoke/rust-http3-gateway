@@ -59,6 +59,12 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         mirror_to_backend: false,
     },
     CommandSpec {
+        command_name: "user_identity_key_register",
+        routing_class: RoutingClass::BackendControl,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
         command_name: "user_identity_vault_register",
         routing_class: RoutingClass::BackendControl,
         message_type: MessageSemanticType::Command,
@@ -701,6 +707,18 @@ pub const COMMAND_REGISTRY: &[CommandSpec] = &[
         mirror_to_backend: true,
     },
     CommandSpec {
+        command_name: "file_transfer_complete_ack",
+        routing_class: RoutingClass::RelayHotpath,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: true,
+    },
+    CommandSpec {
+        command_name: "file_transfer_resume_request",
+        routing_class: RoutingClass::RelayHotpath,
+        message_type: MessageSemanticType::Command,
+        mirror_to_backend: false,
+    },
+    CommandSpec {
         command_name: "file_transfer_cancel",
         routing_class: RoutingClass::RelayHotpath,
         message_type: MessageSemanticType::Command,
@@ -772,6 +790,14 @@ pub const RELAY_AUTHORIZATION_REGISTRY: &[RelayAuthorizationEntry] = &[
     },
     RelayAuthorizationEntry {
         command_name: "file_transfer_complete",
+        spec: FILE_TRANSFER_PEER_CONTEXT,
+    },
+    RelayAuthorizationEntry {
+        command_name: "file_transfer_complete_ack",
+        spec: FILE_TRANSFER_PEER_CONTEXT,
+    },
+    RelayAuthorizationEntry {
+        command_name: "file_transfer_resume_request",
         spec: FILE_TRANSFER_PEER_CONTEXT,
     },
     RelayAuthorizationEntry {
