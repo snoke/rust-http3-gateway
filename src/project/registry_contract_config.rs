@@ -13,7 +13,6 @@ pub const FRONTEND_EMITTER_TYPE_FILES: &[&str] = &[
     "frontend/src/plugins/contact-book/components/ContactBookHome.vue",
     "frontend/src/plugins/components/useRealtimeContactOptions.ts",
     "frontend/src/plugins/identity/components/ClientsList.vue",
-    "frontend/src/plugins/chat/components/ChatDesktopHome.vue",
 ];
 
 pub const FRONTEND_IGNORED_TYPE_LITERALS: &[&str] = &[
