@@ -18,6 +18,7 @@ pub struct Config {
     pub redis_stream: String,
     pub redis_inbox_stream: String,
     pub redis_events_stream: String,
+    pub outbox_delete_on_consume: bool,
     pub max_connections_per_user: Option<usize>,
     pub stale_connection_timeout_seconds: i64,
     pub stale_prune_interval_seconds: u64,
@@ -52,6 +53,7 @@ impl Config {
         let redis_stream = env_str("REDIS_STREAM", "ws.outbox");
         let redis_inbox_stream = env_str("REDIS_INBOX_STREAM", "ws.inbox");
         let redis_events_stream = env_str("REDIS_EVENTS_STREAM", "ws.events");
+        let outbox_delete_on_consume = env_bool("OUTBOX_DELETE_ON_CONSUME", true);
         let max_connections_per_user = env_usize("MAX_CONNECTIONS_PER_USER").filter(|value| *value > 0);
         let stale_connection_timeout_seconds = env_i64("CONNECTION_STALE_SECONDS", 120).max(0);
         let stale_prune_interval_seconds = env_u64("CONNECTION_PRUNE_INTERVAL_SECONDS", 15).max(1);
@@ -82,6 +84,7 @@ impl Config {
             redis_stream,
             redis_inbox_stream,
             redis_events_stream,
+            outbox_delete_on_consume,
             max_connections_per_user,
             stale_connection_timeout_seconds,
             stale_prune_interval_seconds,
@@ -123,4 +126,11 @@ fn env_usize(key: &str) -> Option<usize> {
     std::env::var(key)
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
+}
+
+fn env_bool(key: &str, default: bool) -> bool {
+    std::env::var(key)
+        .ok()
+        .map(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(default)
 }

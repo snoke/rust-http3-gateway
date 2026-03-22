@@ -292,7 +292,7 @@ pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: r
         }
         for (_stream, entries) in streams {
             for (entry_id, fields) in entries {
-                last_id = entry_id;
+                last_id = entry_id.clone();
                 let raw = fields
                     .get("data")
                     .cloned()
@@ -418,6 +418,17 @@ pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: r
                             buffer_if_undelivered,
                             "outbox enqueued to zero connections"
                         );
+                    }
+
+                    if config.outbox_delete_on_consume {
+                        if let Err(err) = redis::cmd("XDEL")
+                            .arg(&stream)
+                            .arg(&entry_id)
+                            .query_async::<_, ()>(&mut conn)
+                            .await
+                        {
+                            warn!(%entry_id, "redis.xdel_failed: {err}");
+                        }
                     }
                 }
             }
