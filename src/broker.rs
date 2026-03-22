@@ -371,7 +371,7 @@ pub async fn start_outbox_consumer(state: GatewayState, config: Config, redis: r
                             if !delivered_via_route {
                                 // Fallback: deliver to subjects when request-route mapping is missing/stale.
                                 // This avoids client timeouts after reconnects when response still carries a request_id.
-                                let fallback = state.send_to_subjects(&subjects, text.clone(), false, None);
+                                let fallback = state.send_to_subjects(&subjects, text.clone(), true, None);
                                 result.attempted_count += fallback.attempted_count;
                                 result.enqueued_count += fallback.enqueued_count;
                             }

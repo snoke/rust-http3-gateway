@@ -2,10 +2,10 @@ pub const BACKEND_HANDLER_MAP_PATH: &str =
     "symfony/src/Void/Interface/Realtime/MessageHandlerCollection.php";
 
 pub const FRONTEND_EMITTER_TYPE_FILES: &[&str] = &[
-    "frontend/src/app/core/messaging/services/messenger/transport.ts",
-    "frontend/src/app/core/messaging/services/messenger/send.ts",
-    "frontend/src/app/core/messaging/services/messenger/conversation.ts",
-    "frontend/src/app/core/messaging/services/messenger.ts",
+    "frontend/src/app/messaging/messenger/transport.ts",
+    "frontend/src/app/messaging/messenger/send.ts",
+    "frontend/src/app/messaging/messenger/conversation.ts",
+    "frontend/src/app/messaging/messenger/index.ts",
     "frontend/src/plugins/file-transfer/services/fileTransferService.ts",
     "frontend/src/plugins/calls/services/callManager.ts",
     "frontend/src/plugins/auth/app/services/auth.ts",
